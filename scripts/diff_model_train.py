@@ -16,7 +16,9 @@ import json
 import logging
 import os
 from datetime import datetime
+import time
 from pathlib import Path
+from functools import wraps
 
 import monai
 import torch
@@ -26,11 +28,32 @@ from monai.networks.schedulers import RFlowScheduler
 from monai.networks.schedulers.ddpm import DDPMPredictionType
 from monai.transforms import Compose
 from monai.utils import first
-from torch.amp import GradScaler, autocast
+from torch.amp import autocast
 from torch.nn.parallel import DistributedDataParallel
 
 from .diff_model_setting import initialize_distributed, load_config, setup_logging
 from .utils import define_instance
+from .ssim import SSIM3D
+
+def amp_forward_wrapper(forward_fn):
+    @wraps(forward_fn)
+    def wrapped(*args, **kwargs):
+        with autocast("cuda"):
+            return forward_fn(*args, **kwargs)
+    return wrapped
+
+class Loss(torch.nn.Module):
+    def __init__(self, alpha=0.2, beta=0.8):
+        super().__init__()
+        self.l1_loss = torch.nn.L1Loss()
+        self.ssim = SSIM3D()
+        self.alpha = alpha
+        self.beta = beta
+
+    def forward(self, outputs, targets):
+        l1 = self.l1_loss(outputs, targets)
+        l2 = (1-self.ssim(outputs, targets))/2
+        return self.alpha * l1 + self.beta * l2
 
 def augment_modality_label(modality_tensor, prob=0.1):
     """
@@ -66,7 +89,7 @@ def augment_modality_label(modality_tensor, prob=0.1):
 
 
 
-def load_filenames(data_list_path: str) -> list:
+def load_filenames(data_list_path: str, mode: str) -> list:
     """
     Load filenames from the JSON data list.
 
@@ -78,8 +101,11 @@ def load_filenames(data_list_path: str) -> list:
     """
     with open(data_list_path, "r") as file:
         json_data = json.load(file)
-    filenames_train = json_data["training"]
-    return [_item["image"].replace(".nii.gz", "_emb.nii.gz") for _item in filenames_train]
+    filenames_train = json_data[mode]
+    return [{"src_image": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
+             "tar_image": _item["tar_image"].replace(".nii.gz", "_emb_std.npy"),
+             "src_std": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
+             "tar_std": _item["tar_image"].replace(".nii.gz", "_emb_std.npy")} for _item in filenames_train]
 
 
 def prepare_data(
@@ -115,8 +141,9 @@ def prepare_data(
                 return json.load(f)[key]
 
     train_transforms_list = [
-        monai.transforms.LoadImaged(keys=["image"]),
-        monai.transforms.EnsureChannelFirstd(keys=["image"]),
+        monai.transforms.LoadImaged(keys=["src_image", "tar_image", "src_std", "tar_std"]),
+        monai.transforms.EnsureChannelFirstd(keys=["src_image", "tar_image"], channel_dim=-1),
+        monai.transforms.EnsureChannelFirstd(keys=["src_std", "tar_std"], channel_dim=-1),
         monai.transforms.Lambdad(keys="spacing", func=lambda x: _load_data_from_file(x, "spacing")),
         monai.transforms.Lambdad(keys="spacing", func=lambda x: x * 1e2),
     ]
@@ -161,6 +188,7 @@ def load_unet(args: argparse.Namespace, device: torch.device, logger: logging.Lo
     """
     unet = define_instance(args, "diffusion_unet_def").to(device)
     unet = torch.nn.SyncBatchNorm.convert_sync_batchnorm(unet)
+    unet.forward = amp_forward_wrapper(unet.forward)
 
     if dist.is_initialized():
         unet = DistributedDataParallel(unet, device_ids=[device], find_unused_parameters=True)
@@ -169,7 +197,7 @@ def load_unet(args: argparse.Namespace, device: torch.device, logger: logging.Lo
         logger.info("Training from scratch.")
     else:
         checkpoint_unet = torch.load(f"{args.existing_ckpt_filepath}", map_location=device, weights_only=False)
-        
+
         if dist.is_initialized():
             unet.module.load_state_dict(checkpoint_unet["unet_state_dict"], strict=False)
         else:
@@ -179,7 +207,7 @@ def load_unet(args: argparse.Namespace, device: torch.device, logger: logging.Lo
     return unet
 
 
-def calculate_scale_factor(train_loader: DataLoader, device: torch.device, logger: logging.Logger) -> torch.Tensor:
+def calculate_scale_factor(train_files, device: torch.device, logger: logging.Logger) -> torch.Tensor:
     """
     Calculate the scaling factor for the dataset.
 
@@ -191,14 +219,24 @@ def calculate_scale_factor(train_loader: DataLoader, device: torch.device, logge
     Returns:
         torch.Tensor: Calculated scaling factor.
     """
-    check_data = first(train_loader)
-    z = check_data["image"].to(device)
-    scale_factor = 1 / torch.std(z)
-    logger.info(f"Scaling factor set to {scale_factor}.")
+    data_transforms_list = [
+        monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
+        monai.transforms.EnsureChannelFirstd(keys=["src_image", "tar_image"],channel_dim=-1),
+        monai.transforms.EnsureTyped(keys=["src_image", "tar_image"], dtype=torch.float32)
+    ]
+    data_transforms = Compose(data_transforms_list)
+    tensor_list = []
+    for d in train_files:
+        d_transformed = data_transforms(d)
+        tensor_list.append(d_transformed["src_image"])
+        tensor_list.append(d_transformed["tar_image"])
+    all_data = torch.stack(tensor_list, dim=0)
+    scale_factor = 1 / torch.std(all_data.to(device), dim=0, keepdim=True, unbiased=False)
 
     if dist.is_initialized():
         dist.barrier()
         dist.all_reduce(scale_factor, op=torch.distributed.ReduceOp.AVG)
+    logger.info(f"Scale factor is valid -> {torch.isfinite(scale_factor).all().item()}.")
     logger.info(f"scale_factor -> {scale_factor}.")
     return scale_factor
 
@@ -238,7 +276,7 @@ def train_one_epoch(
     optimizer: torch.optim.Optimizer,
     lr_scheduler: torch.optim.lr_scheduler.PolynomialLR,
     loss_pt: torch.nn.L1Loss,
-    scaler: GradScaler,
+    #scaler: GradScaler,
     scale_factor: torch.Tensor,
     noise_scheduler: torch.nn.Module,
     num_images_per_batch: int,
@@ -271,8 +309,12 @@ def train_one_epoch(
     Returns:
         torch.Tensor: Training loss for the epoch.
     """
-    include_body_region = unet.include_top_region_index_input
-    include_modality = unet.num_class_embeds is not None
+    if dist.is_initialized():
+        include_body_region = unet.module.include_top_region_index_input
+        include_modality = unet.module.num_class_embeds is not None
+    else:
+        include_body_region = unet.include_top_region_index_input
+        include_modality = unet.num_class_embeds is not None
 
     if local_rank == 0:
         current_lr = optimizer.param_groups[0]["lr"]
@@ -286,76 +328,78 @@ def train_one_epoch(
         current_lr = optimizer.param_groups[0]["lr"]
 
         _iter += 1
-        images = train_data["image"].to(device)
-        images = images * scale_factor
+        src_images = train_data["src_image"].to(device)
+        tar_images = train_data["tar_image"].to(device)
+        src_stds = train_data["src_std"].to(device)
+        tar_stds = train_data["tar_std"].to(device)
+        src_images = src_images * scale_factor
+        tar_images = tar_images * scale_factor
+        src_stds = src_stds * torch.abs(scale_factor)
+        tar_stds = tar_stds * torch.abs(scale_factor)
 
         if include_body_region:
             top_region_index_tensor = train_data["top_region_index"].to(device)
             bottom_region_index_tensor = train_data["bottom_region_index"].to(device)
         if include_modality:
-            modality_tensor = train_data["modality"].to(device)     
+            modality_tensor = train_data["modality"].to(device)
             modality_tensor = augment_modality_label(modality_tensor).to(device)
 
         spacing_tensor = train_data["spacing"].to(device)
 
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast("cuda", enabled=amp):
-            noise = torch.randn_like(images)
+        #with autocast("cuda", enabled=amp, dtype=torch.bfloat16):
 
-            if isinstance(noise_scheduler, RFlowScheduler):
-                timesteps = noise_scheduler.sample_timesteps(images)
-            else:
-                timesteps = torch.randint(0, num_train_timesteps, (images.shape[0],), device=images.device).long()
 
-            noisy_latent = noise_scheduler.add_noise(original_samples=images, noise=noise, timesteps=timesteps)
+        assert isinstance(noise_scheduler, RFlowScheduler)
+        timesteps = noise_scheduler.sample_timesteps(src_images)
+        #else:
+        #    timesteps = torch.randint(0, num_train_timesteps, (src_images.shape[0],), device=src_images.device).long()
 
-            # Create a dictionary to store the inputs
-            unet_inputs = {
-                "x": noisy_latent,
-                "timesteps": timesteps,
-                "spacing_tensor": spacing_tensor,
-            }
-            # Add extra arguments if include_body_region is True
-            if include_body_region:
-                unet_inputs.update(
-                    {
-                        "top_region_index_tensor": top_region_index_tensor,
-                        "bottom_region_index_tensor": bottom_region_index_tensor,
-                    }
-                )
-            if include_modality:
-                unet_inputs.update(
-                    {
-                        "class_labels": modality_tensor,
-                    }
-                )
+        mu_t = noise_scheduler.add_noise(original_samples=src_images, noise=tar_images, timesteps=timesteps)
+        std_t = noise_scheduler.add_noise(original_samples=src_stds, noise=tar_stds, timesteps=timesteps)
+        noise = torch.randn_like(mu_t)
+        noisy_latent = mu_t + noise * std_t
+
+        # Create a dictionary to store the inputs
+        unet_inputs = {
+            "x": noisy_latent,
+            "timesteps": timesteps,
+            "spacing_tensor": spacing_tensor,
+        }
+        # Add extra arguments if include_body_region is True
+        if include_body_region:
+            unet_inputs.update(
+                {
+                    "top_region_index_tensor": top_region_index_tensor,
+                    "bottom_region_index_tensor": bottom_region_index_tensor,
+                }
+            )
+        if include_modality:
+            unet_inputs.update(
+                {
+                    "class_labels": modality_tensor,
+                }
+            )
+        with autocast("cuda", enabled=amp, dtype=torch.bfloat16):
             model_output = unet(**unet_inputs)
 
-            if noise_scheduler.prediction_type == DDPMPredictionType.EPSILON:
-                # predict noise
-                model_gt = noise
-            elif noise_scheduler.prediction_type == DDPMPredictionType.SAMPLE:
-                # predict sample
-                model_gt = images
-            elif noise_scheduler.prediction_type == DDPMPredictionType.V_PREDICTION:
-                # predict velocity
-                model_gt = images - noise
-            else:
-                raise ValueError(
-                    "noise scheduler prediction type has to be chosen from ",
-                    f"[{DDPMPredictionType.EPSILON},{DDPMPredictionType.SAMPLE},{DDPMPredictionType.V_PREDICTION}]",
-                )
+            model_gt = (tar_stds - src_stds) * noise + (tar_images - src_images)
+            logger.info("model gt is finite -> " + str(torch.isfinite(model_gt).all().item()))
+            logger.info("model input is finite -> " + str(torch.isfinite(noisy_latent).all().item()))
+            logger.info("model output is finite -> " + str(torch.isfinite(model_output).all().item()))
 
-            loss = loss_pt(model_output.float(), model_gt.float())
+            loss = loss_pt(model_output, model_gt)
 
-        if amp:
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
-        else:
-            loss.backward()
-            optimizer.step()
+        # if amp:
+        #     scaler.scale(loss).backward()
+        #     scaler.step(optimizer)
+        #     scaler.update()
+        # else:
+        #     loss.backward()
+        #     optimizer.step()
+        loss.backward()
+        optimizer.step()
 
         lr_scheduler.step()
 
@@ -440,36 +484,49 @@ def diff_model_train(
 
     unet = load_unet(args, device, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    include_body_region = unet.include_top_region_index_input
-    include_modality = (unet.num_class_embeds is not None)
+    if dist.is_initialized():
+        include_body_region = unet.module.include_top_region_index_input
+        include_modality = unet.module.num_class_embeds is not None
+    else:
+        include_body_region = unet.include_top_region_index_input
+        include_modality = unet.num_class_embeds is not None
     if include_modality:
         with open(args.modality_mapping_path, "r") as f:
             args.modality_mapping = json.load(f)
     else:
         args.modality_mapping = None
 
-    filenames_train = load_filenames(args.json_data_list)
+    filenames_train = load_filenames(args.json_data_list, mode="training")
     if local_rank == 0:
         logger.info(f"num_files_train: {len(filenames_train)}")
 
     train_files = []
     for _i in range(len(filenames_train)):
-        str_img = os.path.join(args.embedding_base_dir, filenames_train[_i])
-        if not os.path.exists(str_img):
+        str_src_img = os.path.join(args.embedding_base_dir,"training", filenames_train[_i]["src_image"])
+        str_tar_img = os.path.join(args.embedding_base_dir,"training", filenames_train[_i]["tar_image"])
+        str_src_std = os.path.join(args.embedding_base_dir,"training", filenames_train[_i]["src_std"])
+        str_tar_std = os.path.join(args.embedding_base_dir,"training", filenames_train[_i]["tar_std"])
+        if (not os.path.exists(str_src_img)) and (not os.path.exists(str_tar_img)):
             continue
 
-        str_info = os.path.join(args.embedding_base_dir, filenames_train[_i]) + ".json"
-        train_files_i = {"image": str_img, "spacing": str_info}
+        str_info = os.path.join(args.embedding_base_dir,"training" , filenames_train[_i]["src_image"]) + ".json"
+        train_files_i = {"src_image": str_src_img,
+                         "tar_image": str_tar_img,
+                         "src_std": str_src_std,
+                         "tar_std": str_tar_std,
+                         "spacing": str_info}
         if include_body_region:
             train_files_i["top_region_index"] = str_info
             train_files_i["bottom_region_index"] = str_info
         if include_modality:
             train_files_i["modality"] = str_info
         train_files.append(train_files_i)
+    scale_factor = calculate_scale_factor(train_files, device, logger)
     if dist.is_initialized():
         train_files = partition_dataset(
             data=train_files, shuffle=True, num_partitions=dist.get_world_size(), even_divisible=True
         )[local_rank]
+
 
     train_loader = prepare_data(
         train_files,
@@ -481,20 +538,20 @@ def diff_model_train(
         modality_mapping = args.modality_mapping
     )
 
-    scale_factor = calculate_scale_factor(train_loader, device, logger)
     optimizer = create_optimizer(unet, args.diffusion_unet_train["lr"])
 
     total_steps = (args.diffusion_unet_train["n_epochs"] * len(train_loader.dataset)) / args.diffusion_unet_train[
         "batch_size"
     ]
     lr_scheduler = create_lr_scheduler(optimizer, total_steps)
-    loss_pt = torch.nn.L1Loss()
-    scaler = GradScaler("cuda")
+    loss_pt = Loss().to(device)
+    #scaler = GradScaler("cuda")
 
     torch.set_float32_matmul_precision("highest")
     logger.info("torch.set_float32_matmul_precision -> highest.")
 
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
+        start_time = time.perf_counter()
         loss_torch = train_one_epoch(
             epoch,
             unet,
@@ -502,7 +559,7 @@ def diff_model_train(
             optimizer,
             lr_scheduler,
             loss_pt,
-            scaler,
+            #scaler,
             scale_factor,
             noise_scheduler,
             args.diffusion_unet_train["batch_size"],
@@ -512,11 +569,13 @@ def diff_model_train(
             local_rank,
             amp=amp,
         )
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
 
         loss_torch = loss_torch.tolist()
         if torch.cuda.device_count() == 1 or local_rank == 0:
             loss_torch_epoch = loss_torch[0] / loss_torch[1]
-            logger.info(f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}.")
+            logger.info(f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}, time taken: {elapsed_time:.4f}.")
 
             save_checkpoint(
                 epoch,
@@ -562,7 +621,7 @@ if __name__ == "__main__":
         default=1, 
         help="Number of GPUs to use for training"
     )
-    parser.add_argument("--no_amp", dest="amp", action="store_false", help="Disable automatic mixed precision training")
-
+    #parser.add_argument("--no_amp", dest="amp", action="store_true", help="Disable automatic mixed precision training")
+    amp = True
     args = parser.parse_args()
-    diff_model_train(args.env_config, args.model_config, args.model_def, args.num_gpus, args.amp)
+    diff_model_train(args.env_config_path, args.model_config_path, args.model_def_path, args.num_gpus, amp)
