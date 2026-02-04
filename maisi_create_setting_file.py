@@ -1,19 +1,13 @@
-import copy
 import os
 import json
-import numpy as np
-import nibabel as nib
-import subprocess
+import logging
 
-from monai.apps import download_url
-from monai.data import create_test_image_3d
-from monai.config import print_config
-
-from scripts.diff_model_setting import setup_logging
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
-print_config()
-
-logger = setup_logging("create_setting_file")
+logger = logging.getLogger("create_setting_file")
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s.%(msecs)03d][%(levelname)5s](%(name)s) - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 
 # network config
 generate_version = "rflow-ct"
@@ -33,7 +27,7 @@ logger.info(f"Models are {generate_version}, whether to use body_region is {incl
 
 ## data path setup
 env_config_out = dict()
-env_config_out["data_base_dir"] = "./sim_data_dir/data" # data path
+env_config_out["data_base_dir"] = "./sim_data_dir" # data path
 env_config_out["json_data_list"] = "./sim_data_dir/sim_datalist.json" # data list
 env_config_out["embedding_base_dir"] = env_config_out["data_base_dir"] + "_embeddings"
 os.makedirs(env_config_out["embedding_base_dir"], exist_ok=True)
