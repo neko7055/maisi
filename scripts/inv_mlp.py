@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.nn.utils as utils
 import torch.optim as optim
-from sklearn.datasets import make_moons
 
 import numpy as np
 
