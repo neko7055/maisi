@@ -247,7 +247,7 @@ def train_one_epoch(
             src_model_output = src_model_output.view(b, n, -1)  # Reshape back to (b, n, feature_dim)
             tar_model_output = tar_model_output.view(b, n, -1)
 
-            loss = loss_pt(src_model_output,tar_model_output)
+            loss = loss_pt.forward_symmetric(src_model_output,tar_model_output)
 
             # Replaced backward with accelerator
             accelerator.backward(loss)
