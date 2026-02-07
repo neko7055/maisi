@@ -1,12 +1,5 @@
-import copy
 import os
 import json
-import numpy as np
-import nibabel as nib
-import subprocess
-
-from monai.apps import download_url
-from monai.data import create_test_image_3d
 from monai.config import print_config
 
 from scripts.diff_model_setting import setup_logging
@@ -47,6 +40,10 @@ env_config_out["output_prefix"] = "unet_3d"
 env_config_out["trained_autoencoder_path"] = os.path.join(env_config_out["model_dir"], "autoencoder_v1.pt")
 env_config_out["existing_ckpt_filepath"] = os.path.join(env_config_out["model_dir"], "diff_unet_3d_rflow-ct.pt")
 env_config_out["modality_mapping_path"] = os.path.join(env_config_out["work_dir"], "configs", "modality_mapping.json")
+env_config_out["dinov3_repo_path"] = os.path.join(env_config_out["work_dir"], "dinov3")
+env_config_out["dinov3_model_path"] = os.path.join(env_config_out["dinov3_repo_path"], "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth")
+env_config_out["dinov3_model_type"] = "dinov3_vits16plus"
+env_config_out["dinov3_adapter_filename"] = "my_dinov3_adapter.pt"
 
 # download pre-trained model from https://huggingface.co/nvidia/NV-Generate-CT
 # trained_autoencoder_path_url = (
