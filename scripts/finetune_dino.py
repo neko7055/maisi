@@ -24,23 +24,32 @@ from .diff_model_setting import load_config, setup_logging
 from .infonce_loss import GaussianInfoNCELoss
 from .inv_mlp import MLPInvertible
 
+class CNNAdapter(torch.nn.Module):
+    def __init__(self, adapter_dim=32):
+        super(CNNAdapter, self).__init__()
+        kernel_sizes = [1, 3, 5, 7, 9, 11, 13, 15]
+        self.cnn_list = torch.nn.ModuleList([torch.nn.Conv2d(1, adapter_dim, kernel_size=k, padding=k//2) for k in kernel_sizes])
+        self.adapter = torch.nn.Sequential(
+            torch.nn.Tanh(),
+            torch.nn.Conv2d(adapter_dim*8, 3, kernel_size=1, padding=1),
+            torch.nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        cnn_outputs = [cnn(x) for cnn in self.cnn_list]  # List of (B, adapter_dim, H, W)
+        concatenated = torch.cat(cnn_outputs, dim=1)  # (B,
+        return self.adapter(concatenated)  # Scale to [0, 1] before adapter
+
 class DinoWithAdapter(torch.nn.Module):
-    def __init__(self, dino_repo, dino_model, dino_weights,adapter_dim=256):
+    def __init__(self, dino_repo, dino_model, dino_weights,adapter_dim=32):
         super(DinoWithAdapter, self).__init__()
         self.dino_model = torch.hub.load(repo_or_dir=dino_repo,model=dino_model,source="local",
                                          weights=dino_weights)
         for p in self.dino_model.parameters():
             p.requires_grad = False
-        self.adapter = torch.nn.Sequential(torch.nn.Conv2d(1, adapter_dim, kernel_size=1),
-                                           torch.nn.Tanh(),
-                                           torch.nn.Conv2d(adapter_dim, 3, kernel_size=1),
-                                           torch.nn.Sigmoid())
-        #self.zero_conv = torch.nn.Conv2d(adapter_dim, 3, kernel_size=1)
-        #self.zero_conv.weight.data.zero_()
-        #self.zero_conv.bias.data.zero_()
+        self.adapter = CNNAdapter(adapter_dim=adapter_dim)
         self.mean = torch.nn.Parameter(torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.std = torch.nn.Parameter(torch.log(torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)))
-        self.adapter_dim = adapter_dim
         self.distance_head = MLPInvertible(384)
 
     def forward(self, x):
