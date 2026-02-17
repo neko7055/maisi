@@ -5,13 +5,13 @@
 from __future__ import annotations
 
 import argparse
-from typing import Sequence, Dict, List
 import json
 import logging
 import os
-from datetime import datetime
 import time
+from datetime import datetime
 from pathlib import Path
+from typing import Dict, List, Sequence
 
 import numpy as np
 from PIL import Image
@@ -24,37 +24,67 @@ from .diff_model_setting import load_config, setup_logging
 from .infonce_loss import GaussianInfoNCELoss
 from .inv_mlp import MLPInvertible
 
+class SinLU(torch.nn.Module):
+    def __init__(self):
+        super(SinLU,self).__init__()
+        self.a = torch.nn.Parameter(torch.zeros(1))
+        self.b = torch.nn.Parameter(torch.zeros(1))
+        self.beta = torch.nn.Parameter(torch.zeros(1))
+    def forward(self,x):
+        return torch.sigmoid(torch.exp(self.beta)*x)*(x+torch.exp(self.a)*torch.sin(torch.exp(self.b)*x))
+
+class ConvSwiGLU(torch.nn.Module):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, groups=1, bias=True, padding_mode='zeros', device=None, dtype=None):
+        super().__init__()
+        self.conv_a = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias, padding_mode=padding_mode, device=device, dtype=dtype)
+        self.conv_b = torch.nn.Conv2d(in_channels, out_channels, kernel_size, stride=stride, padding=padding, dilation=dilation, groups=groups, bias=bias, padding_mode=padding_mode, device=device, dtype=dtype)
+        self.act = SinLU()
+    def forward(self, x):
+        a, b = self.conv_a(x), self.conv_b(x)
+        return self.act(a) * b
+
 class CNNAdapter(torch.nn.Module):
-    def __init__(self, adapter_dim=32):
+    def __init__(self, adapter_dim):
         super(CNNAdapter, self).__init__()
-        kernel_sizes = [1, 3, 5, 7, 9, 11, 13, 15]
-        self.cnn_list = torch.nn.ModuleList([torch.nn.Conv2d(1, adapter_dim, kernel_size=k, padding=k//2) for k in kernel_sizes])
+        #self.in_norm = torch.nn.InstanceNorm2d(1)
+        #self.param = torch.nn.Parameter(torch.zeros(3))
         self.adapter = torch.nn.Sequential(
-            torch.nn.Tanh(),
-            torch.nn.Conv2d(adapter_dim*8, 3, kernel_size=1, padding=1),
-            torch.nn.Sigmoid()
+            ConvSwiGLU(1, adapter_dim, kernel_size=7, padding=3),
+            torch.nn.Dropout2d(),
+            ConvSwiGLU(adapter_dim, adapter_dim, kernel_size=5, padding=2),
+            torch.nn.Dropout2d(),
+            torch.nn.Conv2d(adapter_dim, 3, kernel_size=3, padding=1),
+            #torch.nn.InstanceNorm2d(1, affine=True),
+            torch.nn.Softsign(),
         )
+        # self.sigmoid = torch.nn.Sigmoid()
 
     def forward(self, x):
-        cnn_outputs = [cnn(x) for cnn in self.cnn_list]  # List of (B, adapter_dim, H, W)
-        concatenated = torch.cat(cnn_outputs, dim=1)  # (B,
-        return self.adapter(concatenated)  # Scale to [0, 1] before adapter
+        # x = torch.cat([x, self.in_norm(x), torch.pow(self.sigmoid(x * torch.exp(self.param[0] + self.param[1])),torch.exp(self.param[2]))],dim=1)
+        # x = self.in_norm(x)
+        return (self.adapter(x / 1000.0) + 1) / 2 # Scale to [0, 1] before adapter
 
 class DinoWithAdapter(torch.nn.Module):
-    def __init__(self, dino_repo, dino_model, dino_weights,adapter_dim=32):
+    def __init__(self, dino_repo, dino_model, dino_weights, adapter_dim=64):
         super(DinoWithAdapter, self).__init__()
-        self.dino_model = torch.hub.load(repo_or_dir=dino_repo,model=dino_model,source="local",
-                                         weights=dino_weights)
+        self.dino_model = torch.hub.load(
+            repo_or_dir=dino_repo,
+            model=dino_model,
+            source="local",
+            weights=dino_weights,
+        )
         for p in self.dino_model.parameters():
             p.requires_grad = False
         self.adapter = CNNAdapter(adapter_dim=adapter_dim)
+        #self.register_buffer('mean',torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
         self.mean = torch.nn.Parameter(torch.tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1))
+        #self.register_buffer('std',torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1))
         self.std = torch.nn.Parameter(torch.log(torch.tensor([0.229, 0.224, 0.225]).view(1, 3, 1, 1)))
         self.distance_head = MLPInvertible(384)
 
     def forward(self, x):
-        x = self.adapter(x / 1000.0)  # Scale to [0, 1] before adapter
-        x = (x - self.mean) / torch.exp(self.std)  # Normalize to DINO's expected input range
+        x = self.adapter(x)  # Scale to [0, 1] before adapter
+        x = (x - self.mean) / torch.exp(self.std)
         features = self.dino_model.forward_features(x)
         cls_token = features["x_norm_clstoken"]
         return self.distance_head(cls_token)
@@ -163,33 +193,48 @@ def load_filenames(data_list_path: str, mode: str) -> list:
     return filenames_train
 
 def prepare_data(
-        train_files: list,
-        cache_rate: float,
-        num_workers: int = 2,
-        batch_size: int = 1,
+    train_files: list,
+    cache_rate: float,
+    num_workers: int = 2,
+    batch_size: int = 1,
 ) -> monai.data.DataLoader:
     # (Modified: removed device arg, rely on Accelerator or manual to() later)
 
     keys = ["src_image", "tar_image"]
     train_transforms = monai.transforms.Compose(
-            [
-                monai.transforms.LoadImaged(keys=keys),
-                monai.transforms.EnsureChannelFirstd(keys=keys),
-                monai.transforms.Orientationd(keys=keys, axcodes="RAS"),
-                monai.transforms.EnsureTyped(keys=keys, dtype=torch.float32),
-            ]
-        )
+        [
+            monai.transforms.LoadImaged(keys=keys),
+            monai.transforms.EnsureChannelFirstd(keys=keys),
+            monai.transforms.Orientationd(keys=keys, axcodes="RAS"),
+            monai.transforms.EnsureTyped(keys=keys, dtype=torch.float32),
+        ]
+    )
 
-    train_ds = PairedSliceCacheDataset(monai.data.CacheDataset(
-        data=train_files, transform=train_transforms, cache_rate=cache_rate, num_workers=num_workers
-    ), num_slices=8, keys=["src_image", "tar_image"], size=512)
+    train_ds = PairedSliceCacheDataset(
+        monai.data.CacheDataset(
+            data=train_files,
+            transform=train_transforms,
+            cache_rate=cache_rate,
+            num_workers=num_workers,
+        ),
+        num_slices=8,
+        keys=["src_image", "tar_image"],
+        size=512,
+    )
+
 
     return monai.data.DataLoader(train_ds, num_workers=num_workers, batch_size=batch_size, shuffle=True)
 
 
-def load_model(args: argparse.Namespace, accelerator: Accelerator, logger: logging.Logger) -> torch.nn.Module:
+def load_model(
+    args: argparse.Namespace, accelerator: Accelerator, logger: logging.Logger
+) -> torch.nn.Module:
     # Load model to CPU first, let Accelerate handle movement
-    model = DinoWithAdapter(args.dinov3_repo_path, args.dinov3_model_type, args.dinov3_model_path, adapter_dim=256)
+    model = DinoWithAdapter(
+        args.dinov3_repo_path,
+        args.dinov3_model_type,
+        args.dinov3_model_path,
+    )
 
     # # Optional: Convert BatchNorm to SyncBatchNorm for DDP
     # if accelerator.num_processes > 1:
@@ -204,6 +249,7 @@ def load_model(args: argparse.Namespace, accelerator: Accelerator, logger: loggi
     #     logger.info(f"Pretrained checkpoint {args.existing_ckpt_filepath} loaded.")
 
     return model
+
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
@@ -280,38 +326,67 @@ def train_one_epoch(
     return loss_torch
 
 def inference_adapter(
-        epoch: int,
-        args: argparse.Namespace,
-        model: torch.nn.Module,
-        test_loader: monai.data.DataLoader,
-        accelerator: Accelerator,
+    epoch: int,
+    args: argparse.Namespace,
+    model: torch.nn.Module,
+    test_loader: monai.data.DataLoader,
+    accelerator: Accelerator,
 ):
     model.eval()
     data_idx = 0
-    os.makedirs(f"{args.work_dir}/dino_infer/epoch_{epoch+1}", exist_ok=True)
+    os.makedirs(f"{args.work_dir}/dino_infer/epoch_{epoch + 1}", exist_ok=True)
     with torch.no_grad() and torch.inference_mode():
         for test_data in test_loader:
             device = accelerator.device
             # pick the first slice from each batch item for inference (shape: (b, c, h, w))
             src_images = test_data["src_image"].to(device)[:, 0, :, :, :]
             tar_images = test_data["tar_image"].to(device)[:, 0, :, :, :]
-
+            # tar_images = tar_images - src_images
             # inference and to CPU for later processing
             src_model_output = (model.module.adapter(src_images) * 255).byte().cpu()
             tar_model_output = (model.module.adapter(tar_images) * 255).byte().cpu()
+            # ct clip and normalize for visualization
+            src_images = torch.clamp(src_images, -1000, 1000) / 1000.0
+            src_images = (src_images + 1) / 2.0 * 255.0
+            src_images = src_images.repeat(1, 3, 1, 1)
+            src_images = src_images.byte().cpu()
+
+            tar_images = torch.clamp(tar_images, -1000, 1000) / 1000.0
+            tar_images = (tar_images + 1) / 2.0 * 255.0
+            tar_images = tar_images.repeat(1, 3, 1, 1)
+            tar_images = tar_images.byte().cpu()
 
             # save to png
             for i in range(src_images.shape[0]):
-                save_path_src = f"{args.work_dir}/dino_infer/epoch_{epoch+1}/src_image_{data_idx}.png"
-                save_path_tar = f"{args.work_dir}/dino_infer/epoch_{epoch+1}//tar_image_{data_idx}.png"
+                # fix idx with precess index and epoch to avoid overwrite
+                idx_offset = (
+                    accelerator.process_index * len(test_loader.dataset) + data_idx
+                )
+                save_path_src = f"{args.work_dir}/dino_infer/epoch_{epoch + 1}/src_image_{idx_offset}.png"
+                save_path_tar = f"{args.work_dir}/dino_infer/epoch_{epoch + 1}//tar_image_{idx_offset}.png"
+                save_path_src_origin = f"{args.work_dir}/dino_infer/epoch_{epoch + 1}//src_image_origin_{idx_offset}.png"
+                save_path_tar_origin = f"{args.work_dir}/dino_infer/epoch_{epoch + 1}//tar_image_origin_{idx_offset}.png"
 
-                pil_img_src = Image.fromarray(src_model_output[i].permute(1, 2, 0).numpy())
+                pil_img_src = Image.fromarray(
+                    src_model_output[i].permute(1, 2, 0).numpy()
+                )
                 pil_img_src.save(save_path_src)
 
-                pil_img_tar = Image.fromarray(tar_model_output[i].permute(1, 2, 0).numpy())
+                pil_img_tar = Image.fromarray(
+                    tar_model_output[i].permute(1, 2, 0).numpy()
+                )
                 pil_img_tar.save(save_path_tar)
+                pil_img_src_org = Image.fromarray(
+                    src_images[i].permute(1, 2, 0).numpy()
+                )
+                pil_img_src_org.save(save_path_src_origin)
+                pil_img_tar_org = Image.fromarray(
+                    tar_images[i].permute(1, 2, 0).numpy()
+                )
+                pil_img_tar_org.save(save_path_tar_origin)
                 data_idx += 1
     model.train()
+
 
 def save_checkpoint(
         epoch: int,

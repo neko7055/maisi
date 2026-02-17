@@ -70,11 +70,11 @@ class AffineCoupling(nn.Module):
 
         # s(x1) 和 t(x1) 的神經網路
         self.net = nn.Sequential(
-            torch.nn.utils.parametrizations.spectral_norm(nn.Linear(self.d, hidden_dim)),
+            nn.Linear(self.d, hidden_dim),
             SinLU(),
             InvertibleLinearLU(hidden_dim),
             SinLU(),
-            torch.nn.utils.parametrizations.spectral_norm(nn.Linear(hidden_dim, self.d * 2))  # 同時輸出 scale 和 shift
+            nn.Linear(hidden_dim, self.d * 2)  # 同時輸出 scale 和 shift
         )
 
     def forward(self, x):

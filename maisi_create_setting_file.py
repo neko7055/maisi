@@ -1,5 +1,6 @@
 import os
 import json
+from collections import OrderedDict
 from monai.config import print_config
 
 from scripts.diff_model_setting import setup_logging
@@ -25,7 +26,7 @@ logger.info(f"Models are {generate_version}, whether to use body_region is {incl
 # Set up directories based on configurations
 
 ## data path setup
-env_config_out = dict()
+env_config_out = OrderedDict()
 env_config_out["data_base_dir"] = "./sim_data_dir/data" # data path
 env_config_out["json_data_list"] = "./sim_data_dir/sim_datalist.json" # data list
 env_config_out["embedding_base_dir"] = env_config_out["data_base_dir"] + "_embeddings"
@@ -59,29 +60,30 @@ os.makedirs(env_config_out["model_dir"], exist_ok=True)
 os.makedirs(env_config_out["output_dir"], exist_ok=True)
 
 # Update model configuration for demo
-model_config_out = dict()
-model_config_out["diffusion_unet_train"] = dict()
+model_config_out = OrderedDict()
+model_config_out["diffusion_unet_train"] = OrderedDict()
 model_config_out["diffusion_unet_train"]["batch_size"] = 1
 model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 4
-model_config_out["diffusion_unet_train"]["cache_rate"] = 0
+model_config_out["diffusion_unet_train"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_train"]["lr"] = 0.0001
 model_config_out["diffusion_unet_train"]["n_epochs"] = 1000
-model_config_out["diffusion_unet_train"]["validation_num_steps"] = 2
+model_config_out["diffusion_unet_train"]["validation_num_steps"] = 5
 
-model_config_out["dino_finetune"] = dict()
-model_config_out["dino_finetune"]["batch_size"] = 8
+model_config_out["dino_finetune"] = OrderedDict()
+model_config_out["dino_finetune"]["batch_size"] = 4
 model_config_out["dino_finetune"]["gradient_accumulation_steps"] = 4
-model_config_out["dino_finetune"]["cache_rate"] = 0
-model_config_out["dino_finetune"]["lr"] = 0.0001
-model_config_out["dino_finetune"]["n_epochs"] = 100
+model_config_out["dino_finetune"]["cache_rate"] = 1.0
+model_config_out["dino_finetune"]["lr"] = 0.001
+model_config_out["dino_finetune"]["n_epochs"] = 1000
 
 # modality mapping json
 
-modality_mapping = {
+modality_mapping = OrderedDict({
     "unknown":0,
     "ct":1,
     "ct_wo_contrast":2,
     "ct_contrast":3,
+    "ct_non_contrast_to_contrast": 4,
     "mri":8,
     "mri_t1":9,
     "mri_t2":10,
@@ -92,7 +94,7 @@ modality_mapping = {
     "mri_ssfp":15,
     "mri_mra":16,
     "mri_t1c":17
-}
+})
 
 # save config into work space
 configs_dir = os.path.join(env_config_out["work_dir"], "configs")

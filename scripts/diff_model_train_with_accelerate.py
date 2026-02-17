@@ -12,6 +12,7 @@ from datetime import datetime
 import time
 from pathlib import Path
 from functools import wraps
+import math
 
 import monai
 import numpy as np
@@ -44,17 +45,21 @@ class XSigmoidLoss(torch.nn.Module):
         return torch.mean(2 * ey_t * torch.sigmoid(ey_t) - ey_t)
 
 class Loss(torch.nn.Module):
-    def __init__(self, alpha=0.2, beta=0.8):
+    def __init__(self,):
         super().__init__()
         self.l1_loss = torch.nn.L1Loss()
-        self.ssim = SSIM3D()
-        self.alpha = alpha
-        self.beta = beta
+        self.l2_loss = torch.nn.MSELoss()
+        self.ssim_5 = SSIM3D(window_size=5)
+        self.ssim_15 = SSIM3D(window_size=15)
+        self.ssim_25 = SSIM3D(window_size=25)
+        self.xsigmoidloss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
-        l1 = self.l1_loss(outputs, targets)
-        l2 = (1 - self.ssim(outputs, targets)) / 2
-        return self.alpha * l1 + self.beta * l2
+        l1 = self.l1_loss(outputs, targets) * 0.2
+        l2 = self.l2_loss(outputs, targets) * 0.1
+        ssim = (0.6 - 0.3 * self.ssim_25(outputs, targets) - 0.2 * self.ssim_15(outputs, targets) - 0.1 * self.ssim_5(outputs, targets)) / 2
+        xsigmoid = self.xsigmoidloss(outputs, targets)
+        return l1 + l2 + ssim + xsigmoid
 
 
 def augment_modality_label(modality_tensor, prob=0.1):
@@ -226,6 +231,7 @@ def evaluate(
         unet: torch.nn.Module,
         data_loader: DataLoader,
         scale_factor: torch.Tensor,
+        noise_scheduler: torch.nn.Module,
         num_timesteps: int,
         accelerator: Accelerator,
         logger: logging.Logger,
@@ -268,7 +274,7 @@ def evaluate(
 
         spacing_tensor = eval_data["spacing"].to(device)
 
-        timesteps = np.linspace(0,1,num_timesteps, dtype=np.float64,endpoint=False)
+        timesteps = np.linspace(0,1,num_timesteps, dtype=np.float64,endpoint=False) * noise_scheduler.num_train_timesteps
         h = 1.0 / num_timesteps
         mu_t = src_images
         with torch.inference_mode():
@@ -309,7 +315,7 @@ def train_one_epoch(
         train_loader: DataLoader,
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.PolynomialLR,
-        loss_pt: torch.nn.L1Loss,
+        loss_pt: torch.nn.Module,
         scale_factor: torch.Tensor,
         noise_scheduler: torch.nn.Module,
         num_train_timesteps: int,
@@ -363,10 +369,24 @@ def train_one_epoch(
         assert isinstance(noise_scheduler, RFlowScheduler)
         timesteps = noise_scheduler.sample_timesteps(src_images)
 
-        mu_t = noise_scheduler.add_noise(original_samples=src_images, noise=tar_images, timesteps=timesteps)
-        std_t = noise_scheduler.add_noise(original_samples=src_stds, noise=tar_stds, timesteps=timesteps)
+        # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
+        # mu_t = (1-timesteps_normalize) * src_images + timesteps_normalize * tar_images #noise_scheduler.add_noise(original_samples=src_images, noise=tar_images, timesteps=timesteps)
+        # std_t = (1-timesteps_normalize) * src_stds + timesteps_normalize * tar_stds #noise_scheduler.add_noise(original_samples=src_stds, noise=tar_stds, timesteps=timesteps)
+        # noise = torch.randn_like(mu_t)
+        # noisy_latent = mu_t + noise * std_t
+        # model_gt = (tar_images - src_images) + (tar_stds - src_stds) * noise
+
+        timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
+        alpha = math.pi / 2
+        c_t, s_t = torch.cos(alpha * timesteps_normalize), torch.sin(alpha * timesteps_normalize)
+        mu_t = c_t * src_images + s_t * tar_images
+        cov_t = c_t ** 2 * src_stds ** 2 + s_t ** 2 * tar_stds ** 2
+        std_t = torch.sqrt(cov_t)
+        d_mu_t = alpha * (c_t * tar_images - s_t * src_images)
+        d_cov_t = 2 * alpha * s_t * c_t * (tar_stds ** 2 - src_stds ** 2)
         noise = torch.randn_like(mu_t)
-        noisy_latent = mu_t + noise * std_t
+        noisy_latent = mu_t  # + noise * std_t
+        model_gt = d_mu_t  # + d_cov_t / std_t * noise
 
         unet_inputs = {
             "x": noisy_latent,
@@ -384,19 +404,12 @@ def train_one_epoch(
         # Accelerate handles mixed precision automatically if configured
         with accelerator.accumulate(unet):
             model_output = unet(**unet_inputs)
-
-            model_gt = (tar_stds - src_stds) * noise + (tar_images - src_images)
-
-            # Logging only on main process (simplified checks)
-            # if accelerator.is_main_process:
-            #    logger.info(...)
-
             loss = loss_pt(model_output, model_gt)
 
             # Replaced backward with accelerator
             accelerator.backward(loss)
             optimizer.step()
-            lr_scheduler.step()
+            #lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
         loss_torch[0] += loss.item()
@@ -452,7 +465,7 @@ def diff_model_train(
     # mixed_precision can be "no", "fp16", "bf16".
     # It is recommended to configure this via `accelerate config` CLI or pass arg here.
     args = load_config(env_config_path, model_config_path, model_def_path)
-    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"])
+    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"], step_scheduler_with_optimizer=False)
 
 
     logger = setup_logging("training")
@@ -547,10 +560,9 @@ def diff_model_train(
     optimizer = create_optimizer(unet, args.diffusion_unet_train["lr"])
 
     # Calculate steps based on local dataset size (approximate)
-    total_steps = (args.diffusion_unet_train["n_epochs"] * len(train_loader.dataset)) / args.diffusion_unet_train[
-        "batch_size"]
+    total_steps = args.diffusion_unet_train["n_epochs"]
     lr_scheduler = create_lr_scheduler(optimizer, total_steps)
-    loss_pt = XSigmoidLoss().to(accelerator.device)
+    loss_pt = Loss().to(accelerator.device)
 
     # Prepare everything with Accelerate
     # NOTE: We do NOT pass train_loader here because we manually partitioned the dataset
@@ -595,6 +607,7 @@ def diff_model_train(
             unet,
             val_loader,
             scale_factor,
+            noise_scheduler,
             args.diffusion_unet_train["validation_num_steps"],
             accelerator,
             logger,
