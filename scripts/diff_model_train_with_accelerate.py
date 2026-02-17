@@ -425,6 +425,7 @@ def train_one_epoch(
 
     # Reduce loss for logging
     loss_torch = accelerator.reduce(loss_torch, reduction="sum")
+    lr_scheduler.step()
     return loss_torch
 
 
