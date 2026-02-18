@@ -12,7 +12,6 @@ from datetime import datetime
 import time
 from pathlib import Path
 from functools import wraps
-import math
 
 import monai
 import numpy as np
@@ -391,6 +390,7 @@ def train_one_epoch(
         assert isinstance(noise_scheduler, RFlowScheduler)
         timesteps = noise_scheduler.sample_timesteps(src_images)
 
+        # Linear interpolation
         # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
         # mu_t = (1-timesteps_normalize) * src_images + timesteps_normalize * tar_images #noise_scheduler.add_noise(original_samples=src_images, noise=tar_images, timesteps=timesteps)
         # std_t = (1-timesteps_normalize) * src_stds + timesteps_normalize * tar_stds #noise_scheduler.add_noise(original_samples=src_stds, noise=tar_stds, timesteps=timesteps)
@@ -398,17 +398,32 @@ def train_one_epoch(
         # noisy_latent = mu_t + noise * std_t
         # model_gt = (tar_images - src_images) + (tar_stds - src_stds) * noise
 
+        # Albergo and Vanden-Eijnden (2023)
+        # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
+        # alpha = torch.pi / 2
+        # c_t, s_t = torch.cos(alpha * timesteps_normalize), torch.sin(alpha * timesteps_normalize)
+        # mu_t = c_t * src_images + s_t * tar_images
+        # cov_t = c_t ** 2 * src_stds ** 2 + s_t ** 2 * tar_stds ** 2
+        # std_t = torch.sqrt(cov_t)
+        # d_mu_t = alpha * (c_t * tar_images - s_t * src_images)
+        # d_cov_t = 2 * alpha * s_t * c_t * (tar_stds ** 2 - src_stds ** 2)
+        # noise = torch.randn_like(mu_t)
+        # noisy_latent = mu_t  # + noise * std_t
+        # model_gt = d_mu_t  # + d_cov_t / std_t * noise
+
+        # enc-dec
         timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
-        alpha = math.pi / 2
-        c_t, s_t = torch.cos(alpha * timesteps_normalize), torch.sin(alpha * timesteps_normalize)
-        mu_t = c_t * src_images + s_t * tar_images
-        cov_t = c_t ** 2 * src_stds ** 2 + s_t ** 2 * tar_stds ** 2
-        std_t = torch.sqrt(cov_t)
-        d_mu_t = alpha * (c_t * tar_images - s_t * src_images)
-        d_cov_t = 2 * alpha * s_t * c_t * (tar_stds ** 2 - src_stds ** 2)
+        t_ = timesteps_normalize[:, None, None, None, None]
+        mu_coef = torch.cos(torch.pi * t_) ** 2
+        d_mu_coef = -torch.pi * torch.sin(2 * torch.pi * t_)
+        z_coef = torch.sin(torch.pi * t_) ** 2
+        d_z_coef = torch.pi * torch.sin(2 * torch.pi * t_)
+        images = torch.where(t_ < 0.5, src_images, tar_images)
+        mu_t = mu_coef * images
+        d_mu_t = d_mu_coef * images
         noise = torch.randn_like(mu_t)
-        noisy_latent = mu_t  # + noise * std_t
-        model_gt = d_mu_t  # + d_cov_t / std_t * noise
+        noisy_latent = mu_t + z_coef * noise
+        model_gt = d_mu_t + d_z_coef * noise
 
         unet_inputs = {
             "x": noisy_latent,
