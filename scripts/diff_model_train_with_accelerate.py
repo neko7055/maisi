@@ -23,6 +23,7 @@ from monai.data import DataLoader, partition_dataset
 from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
 from monai.utils import first
+from tqdm import tqdm
 from accelerate import Accelerator  # Import Accelerate
 from accelerate.utils import set_seed
 
