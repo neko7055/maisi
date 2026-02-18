@@ -567,7 +567,7 @@ def diff_model_train(
     # Calculate scale factor locally then sync
     scale_factor = calculate_scale_factor(train_files, accelerator, logger)
     noise_scheduler.set_timesteps(
-        num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
+        num_inference_steps=args.diffusion_unet_train["validation_num_steps"],
         input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
     )
 
