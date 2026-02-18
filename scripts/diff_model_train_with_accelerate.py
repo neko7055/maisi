@@ -246,6 +246,13 @@ def evaluate(
     _iter = 0
     loss_torch = torch.zeros(2, dtype=torch.float, device=accelerator.device)
 
+    all_timesteps = noise_scheduler.timesteps
+    all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0], dtype=all_timesteps.dtype)))
+    progress_bar = tqdm(
+        zip(all_timesteps, all_next_timesteps),
+        total=min(len(all_timesteps), len(all_next_timesteps)),
+    )
+
     unet.eval()
 
     # Iterate over loader
@@ -274,14 +281,14 @@ def evaluate(
 
         spacing_tensor = eval_data["spacing"].to(device)
 
-        timesteps = np.linspace(0,1,num_timesteps, dtype=np.float64,endpoint=False) * noise_scheduler.num_train_timesteps
-        h = 1.0 / num_timesteps
+        # timesteps = np.linspace(0,1,num_timesteps, dtype=np.float64,endpoint=False) * noise_scheduler.num_train_timesteps
+        # h = 1.0 / num_timesteps
         mu_t = src_images
         with torch.inference_mode():
-            for timestep in timesteps:
+            for t, next_t in progress_bar:
                 unet_inputs = {
                     "x": mu_t,
-                    "timesteps": torch.atleast_1d(torch.as_tensor(timestep,dtype=torch.float32, device=accelerator.device)),
+                    "timesteps": torch.Tensor((t,)).to(device),
                     "spacing_tensor": spacing_tensor,
                 }
                 if include_body_region:
@@ -291,9 +298,24 @@ def evaluate(
                     })
                 if include_modality:
                     unet_inputs.update({"class_labels": modality_tensor})
-
                 model_output = unet(**unet_inputs)
-                mu_t = mu_t + h * model_output
+                mu_t, _ = noise_scheduler.step(model_output, t, mu_t, next_t)
+            # for timestep in timesteps:
+            #     unet_inputs = {
+            #         "x": mu_t,
+            #         "timesteps": torch.atleast_1d(torch.as_tensor(timestep,dtype=torch.float32, device=accelerator.device)),
+            #         "spacing_tensor": spacing_tensor,
+            #     }
+            #     if include_body_region:
+            #         unet_inputs.update({
+            #             "top_region_index_tensor": top_region_index_tensor,
+            #             "bottom_region_index_tensor": bottom_region_index_tensor,
+            #         })
+            #     if include_modality:
+            #         unet_inputs.update({"class_labels": modality_tensor})
+            #
+            #     model_output = unet(**unet_inputs)
+            #     mu_t = mu_t + h * model_output
 
                 # Logging only on main process (simplified checks)
                 # if accelerator.is_main_process:
@@ -529,6 +551,10 @@ def diff_model_train(
 
     # Calculate scale factor locally then sync
     scale_factor = calculate_scale_factor(train_files, accelerator, logger)
+    noise_scheduler.set_timesteps(
+        num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
+        input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
+    )
 
     # Create DataLoader with local subset
     train_loader = prepare_data(
