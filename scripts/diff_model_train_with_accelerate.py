@@ -418,7 +418,7 @@ def train_one_epoch(
         # d_mu_coef = -torch.pi * torch.sin(2 * torch.pi * t_)
         # z_coef = torch.sin(torch.pi * t_) ** 2
         # d_z_coef = torch.pi * torch.sin(2 * torch.pi * t_)
-        # mask = t_ < 0.5
+        # mask = (t_ < 0.5).to(torch.float32)
         # images = src_images * mask + tar_images * (1 - mask)
         # mu_t = mu_coef * images
         # d_mu_t = d_mu_coef * images
