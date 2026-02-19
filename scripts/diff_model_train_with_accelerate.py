@@ -246,13 +246,6 @@ def evaluate(
     _iter = 0
     loss_torch = torch.zeros(2, dtype=torch.float, device=accelerator.device)
 
-    all_timesteps = noise_scheduler.timesteps
-    all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0], dtype=all_timesteps.dtype)))
-    progress_bar = tqdm(
-        zip(all_timesteps, all_next_timesteps),
-        total=min(len(all_timesteps), len(all_next_timesteps)),
-    )
-
     unet.eval()
 
     # Iterate over loader
@@ -283,6 +276,12 @@ def evaluate(
 
         # timesteps = np.linspace(0,1,num_timesteps, dtype=np.float64,endpoint=False) * noise_scheduler.num_train_timesteps
         # h = 1.0 / num_timesteps
+        all_timesteps = noise_scheduler.timesteps
+        all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
+        progress_bar = tqdm(
+            zip(all_timesteps, all_next_timesteps),
+            total=min(len(all_timesteps), len(all_next_timesteps)),
+        )
         mu_t = src_images
         with torch.inference_mode():
             for t, next_t in progress_bar:
