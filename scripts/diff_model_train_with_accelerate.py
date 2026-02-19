@@ -278,13 +278,13 @@ def evaluate(
         # h = 1.0 / num_timesteps
         all_timesteps = noise_scheduler.timesteps
         all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
-        progress_bar = tqdm(
-            zip(all_timesteps, all_next_timesteps),
-            total=min(len(all_timesteps), len(all_next_timesteps)),
-        )
+        # progress_bar = tqdm(
+        #     zip(all_timesteps, all_next_timesteps),
+        #     total=min(len(all_timesteps), len(all_next_timesteps)),
+        # )
         mu_t = src_images
         with torch.inference_mode():
-            for t, next_t in progress_bar:
+            for t, next_t in zip(all_timesteps, all_next_timesteps):
                 unet_inputs = {
                     "x": mu_t,
                     "timesteps": torch.Tensor((t,)).to(device),
@@ -391,12 +391,12 @@ def train_one_epoch(
         timesteps = noise_scheduler.sample_timesteps(src_images)
 
         # Linear interpolation
-        # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
-        # mu_t = (1-timesteps_normalize) * src_images + timesteps_normalize * tar_images #noise_scheduler.add_noise(original_samples=src_images, noise=tar_images, timesteps=timesteps)
-        # std_t = (1-timesteps_normalize) * src_stds + timesteps_normalize * tar_stds #noise_scheduler.add_noise(original_samples=src_stds, noise=tar_stds, timesteps=timesteps)
-        # noise = torch.randn_like(mu_t)
-        # noisy_latent = mu_t + noise * std_t
-        # model_gt = (tar_images - src_images) + (tar_stds - src_stds) * noise
+        timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
+        mu_t = (1-timesteps_normalize) * src_images + timesteps_normalize * tar_images #noise_scheduler.add_noise(original_samples=src_images, noise=tar_images, timesteps=timesteps)
+        std_t = (1-timesteps_normalize) * src_stds + timesteps_normalize * tar_stds #noise_scheduler.add_noise(original_samples=src_stds, noise=tar_stds, timesteps=timesteps)
+        noise = torch.randn_like(mu_t)
+        noisy_latent = mu_t # + noise * std_t
+        model_gt = (tar_images - src_images) # + (tar_stds - src_stds) * noise
 
         # Albergo and Vanden-Eijnden (2023)
         # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
@@ -412,18 +412,19 @@ def train_one_epoch(
         # model_gt = d_mu_t  # + d_cov_t / std_t * noise
 
         # enc-dec
-        timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
-        t_ = timesteps_normalize[:, None, None, None, None]
-        mu_coef = torch.cos(torch.pi * t_) ** 2
-        d_mu_coef = -torch.pi * torch.sin(2 * torch.pi * t_)
-        z_coef = torch.sin(torch.pi * t_) ** 2
-        d_z_coef = torch.pi * torch.sin(2 * torch.pi * t_)
-        images = torch.where(t_ < 0.5, src_images, tar_images)
-        mu_t = mu_coef * images
-        d_mu_t = d_mu_coef * images
-        noise = torch.randn_like(mu_t)
-        noisy_latent = mu_t + z_coef * noise
-        model_gt = d_mu_t + d_z_coef * noise
+        # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
+        # t_ = timesteps_normalize[:, None, None, None, None]
+        # mu_coef = torch.cos(torch.pi * t_) ** 2
+        # d_mu_coef = -torch.pi * torch.sin(2 * torch.pi * t_)
+        # z_coef = torch.sin(torch.pi * t_) ** 2
+        # d_z_coef = torch.pi * torch.sin(2 * torch.pi * t_)
+        # mask = t_ < 0.5
+        # images = src_images * mask + tar_images * (1 - mask)
+        # mu_t = mu_coef * images
+        # d_mu_t = d_mu_coef * images
+        # noise = torch.randn_like(mu_t)
+        # noisy_latent = mu_t + z_coef * noise
+        # model_gt = d_mu_t + d_z_coef * noise
 
         unet_inputs = {
             "x": noisy_latent,
