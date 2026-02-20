@@ -193,8 +193,8 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     if len(tensor_list) > 0:
         all_data = torch.stack(tensor_list, dim=0)
         # Compute local std
-        shift_factor = torch.mean(all_data, dim=0, keepdim=True)
-        local_std = torch.std(all_data.to(accelerator.device), dim=0, keepdim=True, unbiased=False)
+        shift_factor = torch.mean(all_data.to(accelerator.device), dim=0, keepdim=True)
+        local_std = torch.std(all_data.to(accelerator.device), dim=0, keepdim=True, unbiased=True)
         # For simplicity in distributed setting, we might want to average the values or gather.
         # Original code reduced the scale_factor.
         scale_factor = 1 / local_std
