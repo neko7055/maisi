@@ -1,40 +1,42 @@
-import torch
-
-def construct_rk4(dtype, device="cpu"):
-    c = torch.tensor([0.5, 0.5, 1.0], dtype=dtype, device=device)
+def construct_rk4():
+    c = [0.5, 0.5, 1.0]
     a = [
-        torch.tensor([0.5], dtype=dtype, device=device),
-        torch.tensor([0.0, 0.5], dtype=dtype, device=device),
-        torch.tensor([0.0, 0.0, 1.0], dtype=dtype, device=device),
+        [0.5],
+        [0.0, 0.5],
+        [0.0, 0.0, 1.0],
     ]
-    b = torch.tensor([1 / 6, 1 / 3, 1 / 3, 1 / 6], dtype=dtype, device=device)
+    b = [1.0 / 6.0, 1.0 / 3.0, 1.0 / 3.0, 1.0 / 6.0]
     return c, a, b
 
-def construct_ralston4(dtype, device="cpu"):
+
+def construct_ralston4():
     sqrt_5 = 2.236067977499789696409173668731276235440
-    c = torch.tensor([2/5, (14 - 3*sqrt_5)/16, 1.0], dtype=dtype, device=device)
+    c = [2.0 / 5.0, (14.0 - 3.0 * sqrt_5) / 16.0, 1.0]
     a = [
-        torch.tensor([2/5], dtype=dtype, device=device),
-        torch.tensor([(-2889 + 1428*sqrt_5)/1024, (3785 - 1620*sqrt_5)/1024], dtype=dtype, device=device),
-        torch.tensor([(-3365 + 2094*sqrt_5)/6040, (-975 - 3046*sqrt_5)/2552, (467040 + 203968*sqrt_5)/240845], dtype=dtype, device=device),
+        [2.0 / 5.0],
+        [(-2889.0 + 1428.0 * sqrt_5) / 1024.0, (3785.0 - 1620.0 * sqrt_5) / 1024.0],
+        [(-3365.0 + 2094.0 * sqrt_5) / 6040.0, (-975.0 - 3046.0 * sqrt_5) / 2552.0,
+         (467040.0 + 203968.0 * sqrt_5) / 240845.0],
     ]
-    b = torch.tensor([(263 + 24*sqrt_5)/1812, (125 - 1000*sqrt_5)/3828, (3426304 + 1661952*sqrt_5)/5924787, (30 - 4*sqrt_5)/123], dtype=dtype, device=device)
-    return c, a, b
-
-def construct_rk5(dtype, device="cpu"):
-    c = torch.tensor([1/3, 2/5, 1, 2/3, 4/5], dtype=dtype, device=device)
-    a = [
-        torch.tensor([1/3], dtype=dtype, device=device),
-        torch.tensor([4/25, 6/25], dtype=dtype, device=device),
-        torch.tensor([1/4, -3, 15/4], dtype=dtype, device=device),
-        torch.tensor([2/27, 10/9, -50/81, 8/81], dtype=dtype, device=device),
-        torch.tensor([2/25, 12/25, 2/15, 8/75, 0], dtype=dtype, device=device),
-    ]
-    b = torch.tensor([23/192, 0, 125/192, 0, -27/64, 125/192], dtype=dtype, device=device)
+    b = [(263.0 + 24.0 * sqrt_5) / 1812.0, (125.0 - 1000.0 * sqrt_5) / 3828.0,
+         (3426304.0 + 1661952.0 * sqrt_5) / 5924787.0, (30.0 - 4.0 * sqrt_5) / 123.0]
     return c, a, b
 
 
-def euler_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: float | None = None):
+def construct_rk5():
+    c = [1.0 / 3.0, 2.0 / 5.0, 1.0, 2.0 / 3.0, 4.0 / 5.0]
+    a = [
+        [1.0 / 3.0],
+        [4.0 / 25.0, 6.0 / 25.0],
+        [1.0 / 4.0, -3.0, 15.0 / 4.0],
+        [2.0 / 27.0, 10.0 / 9.0, -50.0 / 81.0, 8.0 / 81.0],
+        [2.0 / 25.0, 12.0 / 25.0, 2.0 / 15.0, 8.0 / 75.0, 0.0],
+    ]
+    b = [23.0 / 192.0, 0.0, 125.0 / 192.0, 0.0, -27.0 / 64.0, 125.0 / 192.0]
+    return c, a, b
+
+
+def euler_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
         next_timestep = next_timestep
         dt: float = (
@@ -49,7 +51,8 @@ def euler_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: fl
     pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
     return pred_post_sample, pred_original_sample
 
-def midpoint_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: float | None = None):
+
+def midpoint_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
         next_timestep = next_timestep
         dt: float = (
@@ -65,7 +68,8 @@ def midpoint_step(self, f, timestep: float, sample: torch.Tensor, next_timestep:
     pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
     return pred_post_sample, pred_original_sample
 
-def rk4_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: float | None = None):
+
+def rk4_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
         next_timestep = next_timestep
         dt: float = (
@@ -75,9 +79,9 @@ def rk4_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
         dt = (
             1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
         )  # Avoid division by zero
-    c, a, b= construct_ralston4(torch.float64, device=sample.device)
+    c, a, b = construct_ralston4()
     k1 = f(timestep, sample)
-    k2 = f(timestep + c[0] * dt, sample + dt * a[0] * k1)
+    k2 = f(timestep + c[0] * dt, sample + dt * a[0][0] * k1)
     k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
     k4 = f(timestep + c[2] * dt, sample + dt * a[2][0] * k1 + dt * a[2][1] * k2 + dt * a[2][2] * k3)
     v_pred = (
@@ -85,12 +89,13 @@ def rk4_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
             + b[1] * k2
             + b[2] * k3
             + b[3] * k4
-        )
+    )
     pred_post_sample = sample + v_pred * dt
     pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
     return pred_post_sample, pred_original_sample
 
-def rk5_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: float | None = None):
+
+def rk5_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
         next_timestep = next_timestep
         dt: float = (
@@ -100,13 +105,14 @@ def rk5_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
         dt = (
             1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
         )  # Avoid division by zero
-    c, a, b = construct_rk5(torch.float64, device=sample.device)
+    c, a, b = construct_rk5()
     k1 = f(timestep, sample)
-    k2 = f(timestep + c[0] * dt, sample + dt * a[0] * k1)
+    k2 = f(timestep + c[0] * dt, sample + dt * a[0][0] * k1)
     k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
     k4 = f(timestep + c[2] * dt, sample + dt * (a[2][0] * k1 + a[2][1] * k2 + a[2][2] * k3))
     k5 = f(timestep + c[3] * dt, sample + dt * (a[3][0] * k1 + a[3][1] * k2 + a[3][2] * k3 + a[3][3] * k4))
-    k6 = f(timestep + c[4] * dt, sample + dt * (a[4][0] * k1 + a[4][1] * k2 + a[4][2] * k3 + a[4][3] * k4 + a[4][4] * k5))
+    k6 = f(timestep + c[4] * dt,
+           sample + dt * (a[4][0] * k1 + a[4][1] * k2 + a[4][2] * k3 + a[4][3] * k4 + a[4][4] * k5))
     v_pred = (
             b[0] * k1
             + b[1] * k2
@@ -114,12 +120,13 @@ def rk5_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
             + b[3] * k4
             + b[4] * k5
             + b[5] * k6
-        )
+    )
     pred_post_sample = sample + v_pred * dt
     pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
     return pred_post_sample, pred_original_sample
 
+
 if __name__ == "__main__":
     # Example usage
-    c, a, b = construct_rk5(torch.float64)
+    c, a, b = construct_ralston4()
     print(sum(b))  # Should be 1.0 for a valid Runge-Kutta method
