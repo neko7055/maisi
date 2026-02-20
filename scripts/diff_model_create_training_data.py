@@ -99,12 +99,12 @@ def process_file(
     """
     # Build output embedding filename alongside input stem; skip if it already exists.
     out_filename = {"src_image": "", "tar_image": ""}
-    out_filename_std = {"src_image": "", "tar_image": ""}
+    #out_filename_std = {"src_image": "", "tar_image": ""}
     for key in ["src_image", "tar_image"]:
         out_filename_base = files_raw[key].replace(".gz", "").replace(".nii", "")
         out_filename_base = os.path.join(args.embedding_base_dir, data_type, out_filename_base)
         out_filename[key] = out_filename_base + "_emb.nii.gz"
-        out_filename_std[key] = out_filename_base + "_emb_std.npy"
+        #out_filename_std[key] = out_filename_base + "_emb_std.npy"
 
     if os.path.isfile(out_filename["src_image"]) and os.path.isfile(out_filename["tar_image"]):
         return
@@ -138,16 +138,16 @@ def process_file(
                     sw_device=device,
                     device=device,
                 )
-                z_mu, z_sigma = dynamic_infer(inferer, autoencoder.encode, pt_nda)
+                z_mu, _ = dynamic_infer(inferer, autoencoder.encode, pt_nda)
                 # z = autoencoder.encode_stage_2_inputs(pt_nda)
-                logger.info(f"{key}, z_mu: {z_mu.size()}, {z_mu.dtype}, z_sigma: {z_sigma.size()}, {z_sigma.dtype}")
+                logger.info(f"{key}, z_mu: {z_mu.size()}, {z_mu.dtype}")
 
                 # Convert latent to NumPy, permute to [X,Y,Z,C], and save as NIfTI with the new affine.
                 out_nda = z_mu.squeeze().cpu().detach().numpy().transpose(1, 2, 3, 0)
-                out_nda_std = z_sigma.squeeze().cpu().detach().numpy().transpose(1, 2, 3, 0)
+                #out_nda_std = z_sigma.squeeze().cpu().detach().numpy().transpose(1, 2, 3, 0)
                 out_img = nib.Nifti1Image(np.float32(out_nda), affine=transformed_data[key].meta["affine"].numpy())
                 nib.save(out_img, out_filename[key])
-                np.save(out_filename_std[key], np.float32(out_nda_std))
+                #np.save(out_filename_std[key], np.float32(out_nda_std))
     except Exception as e:
         # Log and continue; do not crash the whole job on a single failure.
         logger.error(f"Error processing {files_raw[key]}: {e}")
