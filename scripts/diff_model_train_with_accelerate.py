@@ -28,7 +28,7 @@ from .diff_model_setting import load_config, setup_logging
 from .utils import define_instance
 from .ssim import SSIM3D
 from .solver import midpoint_step, rk4_step
-from .interpolator import linear_interpolate, triangular_interpolate
+from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
 
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
