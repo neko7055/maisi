@@ -12,6 +12,7 @@ from datetime import datetime
 import time
 from pathlib import Path
 from types import MethodType
+from functools import partial
 
 import monai
 import torch
@@ -479,7 +480,7 @@ def diff_model_train(
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(rk4_step, noise_scheduler)
-    noise_scheduler.add_noise = MethodType(linear_interpolate, noise_scheduler)
+    noise_scheduler.add_noise = MethodType(partial(triangular_interpolate, add_noise=False), noise_scheduler)
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
