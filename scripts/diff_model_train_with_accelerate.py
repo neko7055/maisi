@@ -11,14 +11,10 @@ import os
 from datetime import datetime
 import time
 from pathlib import Path
-from functools import wraps
+from types import MethodType
 
 import monai
-import numpy as np
 import torch
-# Remove explicit distributed imports
-# import torch.distributed as dist
-# from torch.nn.parallel import DistributedDataParallel
 from monai.data import DataLoader, partition_dataset
 from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
@@ -31,9 +27,21 @@ from .diff_model_setting import load_config, setup_logging
 from .utils import define_instance
 from .ssim import SSIM3D
 
-
-# Remove explicit amp wrapper, Accelerate handles this
-# def amp_forward_wrapper(forward_fn): ...
+def midpoint_step(self, f, timestep: int, sample: torch.Tensor, next_timestep: int | None = None):
+    if next_timestep is not None:
+        next_timestep = int(next_timestep)
+        dt: float = (
+                float(timestep - next_timestep) / self.num_train_timesteps
+        )  # Now next_timestep is guaranteed to be int
+    else:
+        dt = (
+            1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
+        )  # Avoid division by zero
+    x_mid = sample + 0.5 * dt * f(timestep, sample)
+    v_pred = f(timestep + 0.5 * dt, x_mid)
+    pred_post_sample = sample + v_pred * dt
+    pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
+    return pred_post_sample, pred_original_sample
 
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
@@ -285,6 +293,21 @@ def evaluate(
         mu_t = src_images
         with torch.inference_mode():
             for t, next_t in zip(all_timesteps, all_next_timesteps):
+                def model_warpper(t,x):
+                    unet_inputs = {
+                        "x": x,
+                        "timesteps": torch.Tensor((t,)).repeat(x.shape[0]).to(x.device),
+                        "spacing_tensor": spacing_tensor,
+                    }
+                    if include_body_region:
+                        unet_inputs.update({
+                            "top_region_index_tensor": top_region_index_tensor,
+                            "bottom_region_index_tensor": bottom_region_index_tensor,
+                        })
+                    if include_modality:
+                        unet_inputs.update({"class_labels": modality_tensor})
+                    model_output = unet(**unet_inputs)
+                    return model_output
                 unet_inputs = {
                     "x": mu_t,
                     "timesteps": torch.Tensor((t,)).repeat(mu_t.shape[0]).to(device),
@@ -298,23 +321,8 @@ def evaluate(
                 if include_modality:
                     unet_inputs.update({"class_labels": modality_tensor})
                 model_output = unet(**unet_inputs)
-                mu_t, _ = noise_scheduler.step(model_output, t, mu_t, next_t)
-            # for timestep in timesteps:
-            #     unet_inputs = {
-            #         "x": mu_t,
-            #         "timesteps": torch.atleast_1d(torch.as_tensor(timestep,dtype=torch.float32, device=accelerator.device)),
-            #         "spacing_tensor": spacing_tensor,
-            #     }
-            #     if include_body_region:
-            #         unet_inputs.update({
-            #             "top_region_index_tensor": top_region_index_tensor,
-            #             "bottom_region_index_tensor": bottom_region_index_tensor,
-            #         })
-            #     if include_modality:
-            #         unet_inputs.update({"class_labels": modality_tensor})
-            #
-            #     model_output = unet(**unet_inputs)
-            #     mu_t = mu_t + h * model_output
+                #mu_t, _ = noise_scheduler.step(model_output, t, mu_t, next_t)
+                mu_t, _ = noise_scheduler.step(model_warpper, t, mu_t, next_t)
 
                 # Logging only on main process (simplified checks)
                 # if accelerator.is_main_process:
@@ -519,6 +527,7 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
+    noise_scheduler.step = MethodType(midpoint_step, noise_scheduler)  # Replace step function with midpoint method
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
