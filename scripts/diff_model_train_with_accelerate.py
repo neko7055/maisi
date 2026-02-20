@@ -104,8 +104,8 @@ def load_filenames(data_list_path: str, mode: str) -> list:
         json_data = json.load(file)
     filenames_train = json_data[mode]
     return [{"src_image": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
-             "tar_image": _item["tar_image"].replace(".nii.gz", "_emb_std.npy"),
-             "src_std": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
+             "tar_image": _item["tar_image"].replace(".nii.gz", "_emb.nii.gz"),
+             "src_std": _item["src_image"].replace(".nii.gz", "_emb_std.npy"),
              "tar_std": _item["tar_image"].replace(".nii.gz", "_emb_std.npy")} for _item in filenames_train]
 
 
