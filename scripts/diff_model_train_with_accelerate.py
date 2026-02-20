@@ -607,24 +607,26 @@ def diff_model_train(
 
         if accelerator.is_main_process:
             logger.info(f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}, time taken: {elapsed_time//60:.0f}m {elapsed_time%60:.0f}s")
+        if (epoch+1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
+            start_time = time.perf_counter()
+            eval_loss_torch = evaluate(
+                unet,
+                val_loader,
+                scale_factor,
+                noise_scheduler,
+                args.diffusion_unet_train["validation_num_steps"],
+                accelerator,
+                logger,
+                include_body_region,
+                include_modality,
+            )
+            end_time = time.perf_counter()
+            elapsed_time = end_time - start_time
+            eval_loss_torch = eval_loss_torch.tolist()
+            eval_loss_torch_epoch = eval_loss_torch[0] / eval_loss_torch[1]
 
-        eval_loss_torch = evaluate(
-            unet,
-            val_loader,
-            scale_factor,
-            noise_scheduler,
-            args.diffusion_unet_train["validation_num_steps"],
-            accelerator,
-            logger,
-            include_body_region,
-            include_modality,
-        )
-
-        eval_loss_torch = eval_loss_torch.tolist()
-        eval_loss_torch_epoch = eval_loss_torch[0] / eval_loss_torch[1]
-
-        if accelerator.is_main_process:
-            logger.info(f"epoch {epoch + 1} average mse loss on validation set: {eval_loss_torch_epoch:.4f}.")
+            if accelerator.is_main_process:
+                logger.info(f"epoch {epoch + 1} average mse loss on validation set: {eval_loss_torch_epoch:.4f}, time taken: {elapsed_time//60:.0f}m {elapsed_time%60:.0f}s.")
 
         save_checkpoint(
             epoch,
