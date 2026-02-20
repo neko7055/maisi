@@ -540,7 +540,7 @@ def diff_model_train(
     # Prepare file list
     train_files = prepare_file_list(filenames_train,args.embedding_base_dir, "training", include_body_region, include_modality)
     val_files = prepare_file_list(filenames_val,args.embedding_base_dir, "validation", include_body_region, include_modality)
-    test_files = prepare_file_list(filenames_test,args.embedding_base_dir, "test", include_body_region, include_modality)
+    # test_files = prepare_file_list(filenames_test,args.embedding_base_dir, "test", include_body_region, include_modality)
 
     # Partition dataset BEFORE creating CacheDataset to save RAM
     # Accelerate makes this easy by giving us num_processes and process_index
@@ -558,12 +558,12 @@ def diff_model_train(
         even_divisible=True
     )[accelerator.process_index]
 
-    test_files = partition_dataset(
-        data=test_files,
-        shuffle=True,
-        num_partitions=accelerator.num_processes,
-        even_divisible=True
-    )[accelerator.process_index]
+    # test_files = partition_dataset(
+    #     data=test_files,
+    #     shuffle=True,
+    #     num_partitions=accelerator.num_processes,
+    #     even_divisible=True
+    # )[accelerator.process_index]
 
     # Calculate scale factor locally then sync
     scale_factor = calculate_scale_factor(train_files, accelerator, logger)
@@ -585,20 +585,20 @@ def diff_model_train(
     val_loader = prepare_data(
         val_files,
         args.diffusion_unet_train["cache_rate"],
-        batch_size=args.diffusion_unet_train["batch_size"],
+        batch_size=args.diffusion_unet_train["validation_batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
         modality_mapping=args.modality_mapping
     )
 
-    test_loader = prepare_data(
-        test_files,
-        args.diffusion_unet_train["cache_rate"],
-        batch_size=args.diffusion_unet_train["batch_size"],
-        include_body_region=include_body_region,
-        include_modality=include_modality,
-        modality_mapping=args.modality_mapping
-    )
+    # test_loader = prepare_data(
+    #     test_files,
+    #     args.diffusion_unet_train["cache_rate"],
+    #     batch_size=args.diffusion_unet_train["batch_size"],
+    #     include_body_region=include_body_region,
+    #     include_modality=include_modality,
+    #     modality_mapping=args.modality_mapping
+    # )
 
     optimizer = create_optimizer(unet, args.diffusion_unet_train["lr"])
 
