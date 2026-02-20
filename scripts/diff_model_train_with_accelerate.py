@@ -78,16 +78,12 @@ def prepare_file_list(filenames,embedding_base_dir, mode, include_body_region, i
     for _i in range(len(filenames)):
         str_src_img = os.path.join(embedding_base_dir, mode, filenames[_i]["src_image"])
         str_tar_img = os.path.join(embedding_base_dir, mode, filenames[_i]["tar_image"])
-        str_src_std = os.path.join(embedding_base_dir, mode, filenames[_i]["src_std"])
-        str_tar_std = os.path.join(embedding_base_dir, mode, filenames[_i]["tar_std"])
         if (not os.path.exists(str_src_img)) and (not os.path.exists(str_tar_img)):
             continue
 
         str_info = os.path.join(embedding_base_dir, mode, filenames[_i]["src_image"]) + ".json"
         files_i = {"src_image": str_src_img,
                    "tar_image": str_tar_img,
-                   "src_std": str_src_std,
-                   "tar_std": str_tar_std,
                    "spacing": str_info}
         if include_body_region:
             files_i["top_region_index"] = str_info
@@ -104,9 +100,7 @@ def load_filenames(data_list_path: str, mode: str) -> list:
         json_data = json.load(file)
     filenames_train = json_data[mode]
     return [{"src_image": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
-             "tar_image": _item["tar_image"].replace(".nii.gz", "_emb.nii.gz"),
-             "src_std": _item["src_image"].replace(".nii.gz", "_emb_std.npy"),
-             "tar_std": _item["tar_image"].replace(".nii.gz", "_emb_std.npy")} for _item in filenames_train]
+             "tar_image": _item["tar_image"].replace(".nii.gz", "_emb.nii.gz")} for _item in filenames_train]
 
 
 def prepare_data(
@@ -128,9 +122,8 @@ def prepare_data(
                 return json.load(f)[key]
 
     train_transforms_list = [
-        monai.transforms.LoadImaged(keys=["src_image", "tar_image", "src_std", "tar_std"]),
+        monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
         monai.transforms.EnsureChannelFirstd(keys=["src_image", "tar_image"], channel_dim=-1),
-        monai.transforms.EnsureChannelFirstd(keys=["src_std", "tar_std"], channel_dim=-1),
         monai.transforms.Lambdad(keys="spacing", func=lambda x: _load_data_from_file(x, "spacing")),
         monai.transforms.Lambdad(keys="spacing", func=lambda x: x * 1e2),
     ]
@@ -253,13 +246,9 @@ def evaluate(
 
         src_images = eval_data["src_image"].to(device)
         tar_images = eval_data["tar_image"].to(device)
-        src_stds = eval_data["src_std"].to(device)
-        tar_stds = eval_data["tar_std"].to(device)
 
         src_images = src_images * scale_factor
         tar_images = tar_images * scale_factor
-        src_stds = src_stds * torch.abs(scale_factor)
-        tar_stds = tar_stds * torch.abs(scale_factor)
 
         if include_body_region:
             top_region_index_tensor = eval_data["top_region_index"].to(device)
@@ -363,13 +352,9 @@ def train_one_epoch(
 
         src_images = train_data["src_image"].to(device)
         tar_images = train_data["tar_image"].to(device)
-        src_stds = train_data["src_std"].to(device)
-        tar_stds = train_data["tar_std"].to(device)
 
         src_images = src_images * scale_factor
         tar_images = tar_images * scale_factor
-        src_stds = src_stds * torch.abs(scale_factor)
-        tar_stds = tar_stds * torch.abs(scale_factor)
 
         spacing_tensor = train_data["spacing"].to(device)
 
