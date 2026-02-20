@@ -68,6 +68,7 @@ model_config_out["diffusion_unet_train"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_train"]["lr"] = 0.0001
 model_config_out["diffusion_unet_train"]["n_epochs"] = 1000
 model_config_out["diffusion_unet_train"]["validation_num_steps"] = 5
+model_config_out["diffusion_unet_train"]["validation_batch_size"] = 8
 
 model_config_out["dino_finetune"] = OrderedDict()
 model_config_out["dino_finetune"]["batch_size"] = 4
