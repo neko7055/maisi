@@ -1,36 +1,36 @@
 import torch
 
-def construct_rk4(dtype):
-    c = torch.tensor([0.5, 0.5, 1.0], dtype=dtype)
+def construct_rk4(dtype, device="cpu"):
+    c = torch.tensor([0.5, 0.5, 1.0], dtype=dtype, device=device)
     a = [
-        torch.tensor([0.5], dtype=dtype),
-        torch.tensor([0.0, 0.5], dtype=dtype),
-        torch.tensor([0.0, 0.0, 1.0], dtype=dtype),
+        torch.tensor([0.5], dtype=dtype, device=device),
+        torch.tensor([0.0, 0.5], dtype=dtype, device=device),
+        torch.tensor([0.0, 0.0, 1.0], dtype=dtype, device=device),
     ]
-    b = torch.tensor([1 / 6, 1 / 3, 1 / 3, 1 / 6], dtype=dtype)
+    b = torch.tensor([1 / 6, 1 / 3, 1 / 3, 1 / 6], dtype=dtype, device=device)
     return c, a, b
 
-def construct_ralston4(dtype):
+def construct_ralston4(dtype, device="cpu"):
     sqrt_5 = 2.236067977499789696409173668731276235440
-    c = torch.tensor([2/5, (14 - 3*sqrt_5)/16, 1.0], dtype=dtype)
+    c = torch.tensor([2/5, (14 - 3*sqrt_5)/16, 1.0], dtype=dtype, device=device)
     a = [
-        torch.tensor([2/5], dtype=dtype),
-        torch.tensor([(-2889 + 1428*sqrt_5)/1024, (3785 - 1620*sqrt_5)/1024], dtype=dtype),
-        torch.tensor([(-3365 + 2094*sqrt_5)/6040, (-975 - 3046*sqrt_5)/2552, (467040 + 203968*sqrt_5)/240845], dtype=dtype),
+        torch.tensor([2/5], dtype=dtype, device=device),
+        torch.tensor([(-2889 + 1428*sqrt_5)/1024, (3785 - 1620*sqrt_5)/1024], dtype=dtype, device=device),
+        torch.tensor([(-3365 + 2094*sqrt_5)/6040, (-975 - 3046*sqrt_5)/2552, (467040 + 203968*sqrt_5)/240845], dtype=dtype, device=device),
     ]
-    b = torch.tensor([(263 + 24*sqrt_5)/1812, (125 - 1000*sqrt_5)/3828, (3426304 + 1661952*sqrt_5)/5924787, (30 - 4*sqrt_5)/123], dtype=dtype)
+    b = torch.tensor([(263 + 24*sqrt_5)/1812, (125 - 1000*sqrt_5)/3828, (3426304 + 1661952*sqrt_5)/5924787, (30 - 4*sqrt_5)/123], dtype=dtype, device=device)
     return c, a, b
 
-def construct_rk5(dtype):
-    c = torch.tensor([1/3, 2/5, 1, 2/3, 4/5], dtype=dtype)
+def construct_rk5(dtype, device="cpu"):
+    c = torch.tensor([1/3, 2/5, 1, 2/3, 4/5], dtype=dtype, device=device)
     a = [
-        torch.tensor([1/3], dtype=dtype),
-        torch.tensor([4/25, 6/25], dtype=dtype),
-        torch.tensor([1/4, -3, 15/4], dtype=dtype),
-        torch.tensor([2/27, 10/9, -50/81, 8/81], dtype=dtype),
-        torch.tensor([2/25, 12/25, 2/15, 8/75, 0], dtype=dtype),
+        torch.tensor([1/3], dtype=dtype, device=device),
+        torch.tensor([4/25, 6/25], dtype=dtype, device=device),
+        torch.tensor([1/4, -3, 15/4], dtype=dtype, device=device),
+        torch.tensor([2/27, 10/9, -50/81, 8/81], dtype=dtype, device=device),
+        torch.tensor([2/25, 12/25, 2/15, 8/75, 0], dtype=dtype, device=device),
     ]
-    b = torch.tensor([23/192, 0, 125/192, 0, -27/64, 125/192], dtype=dtype)
+    b = torch.tensor([23/192, 0, 125/192, 0, -27/64, 125/192], dtype=dtype, device=device)
     return c, a, b
 
 
@@ -75,7 +75,7 @@ def rk4_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
         dt = (
             1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
         )  # Avoid division by zero
-    c, a, b= construct_ralston4(torch.float64)
+    c, a, b= construct_ralston4(torch.float64, device=sample.device)
     k1 = f(timestep, sample)
     k2 = f(timestep + c[0] * dt, sample + dt * a[0] * k1)
     k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
@@ -100,7 +100,7 @@ def rk5_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
         dt = (
             1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
         )  # Avoid division by zero
-    c, a, b = construct_rk5(torch.float64)
+    c, a, b = construct_rk5(torch.float64, device=sample.device)
     k1 = f(timestep, sample)
     k2 = f(timestep + c[0] * dt, sample + dt * a[0] * k1)
     k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
