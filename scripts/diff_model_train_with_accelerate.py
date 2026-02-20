@@ -26,22 +26,7 @@ from accelerate.utils import set_seed
 from .diff_model_setting import load_config, setup_logging
 from .utils import define_instance
 from .ssim import SSIM3D
-
-def midpoint_step(self, f, timestep: int, sample: torch.Tensor, next_timestep: int | None = None):
-    if next_timestep is not None:
-        next_timestep = int(next_timestep)
-        dt: float = (
-                float(timestep - next_timestep) / self.num_train_timesteps
-        )  # Now next_timestep is guaranteed to be int
-    else:
-        dt = (
-            1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
-        )  # Avoid division by zero
-    x_mid = sample + 0.5 * dt * f(timestep, sample)
-    v_pred = f(timestep + 0.5 * dt, x_mid)
-    pred_post_sample = sample + v_pred * dt
-    pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
-    return pred_post_sample, pred_original_sample
+from solver import midpoint_step
 
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
