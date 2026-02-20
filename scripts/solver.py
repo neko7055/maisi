@@ -75,7 +75,7 @@ def rk4_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
         dt = (
             1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
         )  # Avoid division by zero
-    c, a, b= construct_rk4(torch.float32)
+    c, a, b= construct_ralston4(torch.float64)
     k1 = f(timestep, sample)
     k2 = f(timestep + c[0] * dt, sample + dt * a[0] * k1)
     k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
@@ -100,7 +100,7 @@ def rk5_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
         dt = (
             1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
         )  # Avoid division by zero
-    c, a, b = construct_rk5(torch.float32)
+    c, a, b = construct_rk5(torch.float64)
     k1 = f(timestep, sample)
     k2 = f(timestep + c[0] * dt, sample + dt * a[0] * k1)
     k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
@@ -121,5 +121,5 @@ def rk5_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
 
 if __name__ == "__main__":
     # Example usage
-    c, a, b = construct_ralston4(torch.float32)
+    c, a, b = construct_rk5(torch.float64)
     print(sum(b))  # Should be 1.0 for a valid Runge-Kutta method
