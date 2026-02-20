@@ -90,6 +90,35 @@ def rk4_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: floa
     pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
     return pred_post_sample, pred_original_sample
 
+def rk5_step(self, f, timestep: float, sample: torch.Tensor, next_timestep: float | None = None):
+    if next_timestep is not None:
+        next_timestep = next_timestep
+        dt: float = (
+                float(timestep - next_timestep) / self.num_train_timesteps
+        )  # Now next_timestep is guaranteed to be int
+    else:
+        dt = (
+            1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
+        )  # Avoid division by zero
+    c, a, b = construct_rk5(torch.float32)
+    k1 = f(timestep, sample)
+    k2 = f(timestep + c[0] * dt, sample + dt * a[0] * k1)
+    k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
+    k4 = f(timestep + c[2] * dt, sample + dt * (a[2][0] * k1 + a[2][1] * k2 + a[2][2] * k3))
+    k5 = f(timestep + c[3] * dt, sample + dt * (a[3][0] * k1 + a[3][1] * k2 + a[3][2] * k3 + a[3][3] * k4))
+    k6 = f(timestep + c[4] * dt, sample + dt * (a[4][0] * k1 + a[4][1] * k2 + a[4][2] * k3 + a[4][3] * k4 + a[4][4] * k5))
+    v_pred = (
+            b[0] * k1
+            + b[1] * k2
+            + b[2] * k3
+            + b[3] * k4
+            + b[4] * k5
+            + b[5] * k6
+        )
+    pred_post_sample = sample + v_pred * dt
+    pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
+    return pred_post_sample, pred_original_sample
+
 if __name__ == "__main__":
     # Example usage
     c, a, b = construct_ralston4(torch.float32)
