@@ -13,6 +13,7 @@ import time
 from pathlib import Path
 from types import MethodType
 from functools import partial
+from typing import Any
 
 import monai
 import torch
@@ -173,7 +174,7 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
     return unet
 
 
-def calculate_scale_factor(train_files, accelerator: Accelerator, logger: logging.Logger) -> torch.Tensor:
+def calculate_scale_factor(train_files, accelerator: Accelerator, logger: logging.Logger) -> tuple[torch.Tensor, torch.Tensor]:
     # (Calculates scale factor locally then syncs across processes)
     data_transforms_list = [
         monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
@@ -192,6 +193,7 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     if len(tensor_list) > 0:
         all_data = torch.stack(tensor_list, dim=0)
         # Compute local std
+        shift_factor = torch.mean(all_data, dim=0, keepdim=True)
         local_std = torch.std(all_data.to(accelerator.device), dim=0, keepdim=True, unbiased=False)
         # For simplicity in distributed setting, we might want to average the values or gather.
         # Original code reduced the scale_factor.
@@ -199,13 +201,18 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     else:
         # Fallback if a process has no data (unlikely with proper partition)
         scale_factor = torch.tensor(1.0).to(accelerator.device)
+        shift_factor = torch.tensor(0.0).to(accelerator.device)
+
 
     # Distributed Sync: Average the scale factor across processes
     scale_factor = accelerator.reduce(scale_factor, reduction="mean")
+    shift_factor = accelerator.reduce(shift_factor, reduction="mean")
 
     logger.info(f"Scale factor is valid -> {torch.isfinite(scale_factor).all().item()}.")
     logger.info(f"scale_factor -> {scale_factor}.")
-    return scale_factor
+    logger.info(f"Shift factor is valid -> {torch.isfinite(shift_factor).all().item()}.")
+    logger.info(f"shift_factor -> {shift_factor}.")
+    return shift_factor, scale_factor
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
@@ -218,6 +225,7 @@ def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int) -> t
 def evaluate(
         unet: torch.nn.Module,
         data_loader: DataLoader,
+        shift_factor: torch.Tensor,
         scale_factor: torch.Tensor,
         noise_scheduler: torch.nn.Module,
         accelerator: Accelerator,
@@ -246,8 +254,8 @@ def evaluate(
         src_images = eval_data["src_image"].to(device)
         tar_images = eval_data["tar_image"].to(device)
 
-        src_images = src_images * scale_factor
-        tar_images = tar_images * scale_factor
+        src_images = (src_images - shift_factor) * scale_factor
+        tar_images = (tar_images - shift_factor) * scale_factor
 
         if include_body_region:
             top_region_index_tensor = eval_data["top_region_index"].to(device)
@@ -320,9 +328,9 @@ def train_one_epoch(
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.PolynomialLR,
         loss_pt: torch.nn.Module,
+        shift_factor: torch.Tensor,
         scale_factor: torch.Tensor,
         noise_scheduler: torch.nn.Module,
-        num_train_timesteps: int,
         accelerator: Accelerator,
         logger: logging.Logger,
         include_body_region,
@@ -352,8 +360,8 @@ def train_one_epoch(
         src_images = train_data["src_image"].to(device)
         tar_images = train_data["tar_image"].to(device)
 
-        src_images = src_images * scale_factor
-        tar_images = tar_images * scale_factor
+        src_images = (src_images - shift_factor) * scale_factor
+        tar_images = (tar_images - shift_factor) * scale_factor
 
         spacing_tensor = train_data["spacing"].to(device)
 
@@ -416,6 +424,7 @@ def save_checkpoint(
         unet: torch.nn.Module,
         loss_torch_epoch: float,
         num_train_timesteps: int,
+        shift_factor: torch.Tensor,
         scale_factor: torch.Tensor,
         ckpt_folder: str,
         args: argparse.Namespace,
@@ -434,6 +443,7 @@ def save_checkpoint(
                 "epoch": epoch + 1,
                 "loss": loss_torch_epoch,
                 "num_train_timesteps": num_train_timesteps,
+                "shift_factor": shift_factor,
                 "scale_factor": scale_factor,
                 "unet_state_dict": unwrapped_unet.state_dict(),
             },
@@ -513,7 +523,7 @@ def diff_model_train(
     # )[accelerator.process_index]
 
     # Calculate scale factor locally then sync
-    scale_factor = calculate_scale_factor(train_files, accelerator, logger)
+    shift_factor, scale_factor= calculate_scale_factor(train_files, accelerator, logger)
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_train["validation_num_steps"],
         input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
@@ -573,9 +583,9 @@ def diff_model_train(
             optimizer,
             lr_scheduler,
             loss_pt,
+            shift_factor,
             scale_factor,
             noise_scheduler,
-            args.noise_scheduler["num_train_timesteps"],
             accelerator,
             logger,
             include_body_region,
@@ -597,6 +607,7 @@ def diff_model_train(
             eval_loss_torch = evaluate(
                 unet,
                 val_loader,
+                shift_factor,
                 scale_factor,
                 noise_scheduler,
                 accelerator,
@@ -617,6 +628,7 @@ def diff_model_train(
             unet,
             loss_torch_epoch,
             args.noise_scheduler["num_train_timesteps"],
+            shift_factor,
             scale_factor,
             args.model_dir,
             args,
