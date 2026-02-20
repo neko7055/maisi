@@ -8,28 +8,25 @@ import argparse
 import json
 import logging
 import os
-from datetime import datetime
 import time
+from datetime import datetime
+from functools import partial
 from pathlib import Path
 from types import MethodType
-from functools import partial
-from typing import Any
 
 import monai
 import torch
+from accelerate import Accelerator  # Import Accelerate
 from monai.data import DataLoader, partition_dataset
 from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
-from monai.utils import first
-from tqdm import tqdm
-from accelerate import Accelerator  # Import Accelerate
-from accelerate.utils import set_seed
 
 from .diff_model_setting import load_config, setup_logging
-from .utils import define_instance
+from .interpolator import linear_interpolate
+from .solver import midpoint_step
 from .ssim import SSIM3D
-from .solver import midpoint_step, rk4_step, rk5_step
-from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
+from .utils import define_instance
+
 
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
@@ -37,11 +34,11 @@ class XSigmoidLoss(torch.nn.Module):
 
     def forward(self, y_t, y_prime_t):
         ey_t = y_t - y_prime_t
-        # return torch.mean(2 * ey_t / (1 + torch.exp(-ey_t)) - ey_t)
         return torch.mean(2 * ey_t * torch.sigmoid(ey_t) - ey_t)
 
+
 class Loss(torch.nn.Module):
-    def __init__(self,):
+    def __init__(self, ):
         super().__init__()
         self.l1_loss = torch.nn.L1Loss()
         self.l2_loss = torch.nn.MSELoss()
@@ -53,7 +50,8 @@ class Loss(torch.nn.Module):
     def forward(self, outputs, targets):
         l1 = self.l1_loss(outputs, targets) * 0.2
         l2 = self.l2_loss(outputs, targets) * 0.1
-        ssim = (0.6 - 0.3 * self.ssim_25(outputs, targets) - 0.2 * self.ssim_15(outputs, targets) - 0.1 * self.ssim_5(outputs, targets)) / 2
+        ssim = (0.6 - 0.3 * self.ssim_25(outputs, targets) - 0.2 * self.ssim_15(outputs, targets) - 0.1 * self.ssim_5(
+            outputs, targets)) / 2
         xsigmoid = self.xsigmoidloss(outputs, targets)
         return l1 + l2 + ssim + xsigmoid
 
@@ -73,7 +71,8 @@ def augment_modality_label(modality_tensor, prob=0.1):
 
     return modality_tensor
 
-def prepare_file_list(filenames,embedding_base_dir, mode, include_body_region, include_modality):
+
+def prepare_file_list(filenames, embedding_base_dir, mode, include_body_region, include_modality):
     # Prepare file list
     files_list = []
     for _i in range(len(filenames)):
@@ -174,7 +173,8 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
     return unet
 
 
-def calculate_scale_factor(train_files, accelerator: Accelerator, logger: logging.Logger) -> tuple[torch.Tensor, torch.Tensor]:
+def calculate_scale_factor(train_files, accelerator: Accelerator, logger: logging.Logger) -> tuple[
+    torch.Tensor, torch.Tensor]:
     # (Calculates scale factor locally then syncs across processes)
     data_transforms_list = [
         monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
@@ -203,7 +203,6 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
         scale_factor = torch.tensor(1.0).to(accelerator.device)
         shift_factor = torch.tensor(0.0).to(accelerator.device)
 
-
     # Distributed Sync: Average the scale factor across processes
     scale_factor = accelerator.reduce(scale_factor, reduction="mean")
     shift_factor = accelerator.reduce(shift_factor, reduction="mean")
@@ -221,6 +220,7 @@ def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int) -> torch.optim.lr_scheduler.PolynomialLR:
     return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
+
 
 def evaluate(
         unet: torch.nn.Module,
@@ -265,18 +265,13 @@ def evaluate(
 
         spacing_tensor = eval_data["spacing"].to(device)
 
-        # timesteps = np.linspace(0,1,num_timesteps, dtype=np.float64,endpoint=False) * noise_scheduler.num_train_timesteps
-        # h = 1.0 / num_timesteps
         all_timesteps = noise_scheduler.timesteps
         all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
-        # progress_bar = tqdm(
-        #     zip(all_timesteps, all_next_timesteps),
-        #     total=min(len(all_timesteps), len(all_next_timesteps)),
-        # )
+
         mu_t = src_images
         with torch.inference_mode():
             for t, next_t in zip(all_timesteps, all_next_timesteps):
-                def model_warpper(t,x):
+                def model_warpper(t, x):
                     unet_inputs = {
                         "x": x,
                         "timesteps": torch.Tensor((t,)).repeat(x.shape[0]).to(x.device),
@@ -291,6 +286,7 @@ def evaluate(
                         unet_inputs.update({"class_labels": modality_tensor})
                     model_output = unet(**unet_inputs)
                     return model_output
+
                 unet_inputs = {
                     "x": mu_t,
                     "timesteps": torch.Tensor((t,)).repeat(mu_t.shape[0]).to(device),
@@ -303,8 +299,6 @@ def evaluate(
                     })
                 if include_modality:
                     unet_inputs.update({"class_labels": modality_tensor})
-                model_output = unet(**unet_inputs)
-                #mu_t, _ = noise_scheduler.step(model_output, t, mu_t, next_t)
                 mu_t, _ = noise_scheduler.step(model_warpper, t, mu_t, next_t)
 
                 # Logging only on main process (simplified checks)
@@ -365,7 +359,6 @@ def train_one_epoch(
 
         spacing_tensor = train_data["spacing"].to(device)
 
-
         # Logic remains same
         assert isinstance(noise_scheduler, RFlowScheduler)
         timesteps = noise_scheduler.sample_timesteps(src_images)
@@ -399,7 +392,6 @@ def train_one_epoch(
             # Replaced backward with accelerator
             accelerator.backward(loss)
             optimizer.step()
-            #lr_scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
         loss_torch[0] += loss.item()
@@ -409,7 +401,9 @@ def train_one_epoch(
             if _iter % gradient_accumulation_steps == 0:
                 logger.info(
                     "[{0}] epoch {1}, iter {2}/{3}, loss: {4:.4f}, lr: {5:.12f}.".format(
-                        str(datetime.now())[:19], epoch + 1, _iter//gradient_accumulation_steps, len(train_loader)//gradient_accumulation_steps, loss.item(), current_lr
+                        str(datetime.now())[:19], epoch + 1, _iter // gradient_accumulation_steps,
+                                                  len(train_loader) // gradient_accumulation_steps, loss.item(),
+                        current_lr
                     )
                 )
 
@@ -461,7 +455,6 @@ def diff_model_train(
     accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"],
                               step_scheduler_with_optimizer=False)
 
-
     logger = setup_logging("training")
 
     # Log device info
@@ -495,8 +488,10 @@ def diff_model_train(
         logger.info(f"num_files_test: {len(filenames_test)}")
 
     # Prepare file list
-    train_files = prepare_file_list(filenames_train,args.embedding_base_dir, "training", include_body_region, include_modality)
-    val_files = prepare_file_list(filenames_val,args.embedding_base_dir, "validation", include_body_region, include_modality)
+    train_files = prepare_file_list(filenames_train, args.embedding_base_dir, "training", include_body_region,
+                                    include_modality)
+    val_files = prepare_file_list(filenames_val, args.embedding_base_dir, "validation", include_body_region,
+                                  include_modality)
     # test_files = prepare_file_list(filenames_test,args.embedding_base_dir, "test", include_body_region, include_modality)
 
     # Partition dataset BEFORE creating CacheDataset to save RAM
@@ -523,7 +518,7 @@ def diff_model_train(
     # )[accelerator.process_index]
 
     # Calculate scale factor locally then sync
-    shift_factor, scale_factor= calculate_scale_factor(train_files, accelerator, logger)
+    shift_factor, scale_factor = calculate_scale_factor(train_files, accelerator, logger)
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_train["validation_num_steps"],
         input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
@@ -601,8 +596,9 @@ def diff_model_train(
         loss_torch_epoch = loss_torch[0] / loss_torch[1]
 
         if accelerator.is_main_process:
-            logger.info(f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}, time taken: {elapsed_time//60:.0f}m {elapsed_time%60:.0f}s")
-        if (epoch+1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
+            logger.info(
+                f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s")
+        if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
             start_time = time.perf_counter()
             eval_loss_torch = evaluate(
                 unet,
@@ -621,7 +617,8 @@ def diff_model_train(
             eval_loss_torch_epoch = eval_loss_torch[0] / eval_loss_torch[1]
 
             if accelerator.is_main_process:
-                logger.info(f"epoch {epoch + 1} average mse loss on validation set: {eval_loss_torch_epoch:.4f}, time taken: {elapsed_time//60:.0f}m {elapsed_time%60:.0f}s.")
+                logger.info(
+                    f"epoch {epoch + 1} average mse loss on validation set: {eval_loss_torch_epoch:.4f}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
 
         save_checkpoint(
             epoch,
@@ -634,7 +631,6 @@ def diff_model_train(
             args,
             accelerator
         )
-
 
     logger.info("Training finished")
     accelerator.wait_for_everyone()
