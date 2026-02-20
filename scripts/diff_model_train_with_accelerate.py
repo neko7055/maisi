@@ -27,6 +27,7 @@ from .diff_model_setting import load_config, setup_logging
 from .utils import define_instance
 from .ssim import SSIM3D
 from .solver import midpoint_step, rk4_step
+from .interpolator import linear_interpolate, triangular_interpolate
 
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
@@ -369,13 +370,6 @@ def train_one_epoch(
         src_stds = src_stds * torch.abs(scale_factor)
         tar_stds = tar_stds * torch.abs(scale_factor)
 
-        if include_body_region:
-            top_region_index_tensor = train_data["top_region_index"].to(device)
-            bottom_region_index_tensor = train_data["bottom_region_index"].to(device)
-        if include_modality:
-            modality_tensor = train_data["modality"].to(device)
-            modality_tensor = augment_modality_label(modality_tensor).to(device)
-
         spacing_tensor = train_data["spacing"].to(device)
 
 
@@ -383,59 +377,31 @@ def train_one_epoch(
         assert isinstance(noise_scheduler, RFlowScheduler)
         timesteps = noise_scheduler.sample_timesteps(src_images)
 
-        # Linear interpolation
-        timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
-        mu_t = (1-timesteps_normalize) * src_images + timesteps_normalize * tar_images #noise_scheduler.add_noise(original_samples=src_images, noise=tar_images, timesteps=timesteps)
-        std_t = (1-timesteps_normalize) * src_stds + timesteps_normalize * tar_stds #noise_scheduler.add_noise(original_samples=src_stds, noise=tar_stds, timesteps=timesteps)
-        noise = torch.randn_like(mu_t)
-        noisy_latent = mu_t # + noise * std_t
-        model_gt = (tar_images - src_images) # + (tar_stds - src_stds) * noise
-
-        # Albergo and Vanden-Eijnden (2023)
-        # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
-        # alpha = torch.pi / 2
-        # c_t, s_t = torch.cos(alpha * timesteps_normalize), torch.sin(alpha * timesteps_normalize)
-        # mu_t = c_t * src_images + s_t * tar_images
-        # cov_t = c_t ** 2 * src_stds ** 2 + s_t ** 2 * tar_stds ** 2
-        # std_t = torch.sqrt(cov_t)
-        # d_mu_t = alpha * (c_t * tar_images - s_t * src_images)
-        # d_cov_t = 2 * alpha * s_t * c_t * (tar_stds ** 2 - src_stds ** 2)
-        # noise = torch.randn_like(mu_t)
-        # noisy_latent = mu_t  # + noise * std_t
-        # model_gt = d_mu_t  # + d_cov_t / std_t * noise
-
-        # enc-dec
-        # timesteps_normalize = timesteps.float() / noise_scheduler.num_train_timesteps
-        # t_ = timesteps_normalize[:, None, None, None, None]
-        # mu_coef = torch.cos(torch.pi * t_) ** 2
-        # d_mu_coef = -torch.pi * torch.sin(2 * torch.pi * t_)
-        # z_coef = torch.sin(torch.pi * t_) ** 2
-        # d_z_coef = torch.pi * torch.sin(2 * torch.pi * t_)
-        # mask = (t_ < 0.5).to(torch.float32)
-        # images = src_images * mask + tar_images * (1 - mask)
-        # mu_t = mu_coef * images
-        # d_mu_t = d_mu_coef * images
-        # noise = torch.randn_like(mu_t)
-        # noisy_latent = mu_t + z_coef * noise
-        # model_gt = d_mu_t + d_z_coef * noise
+        mu_t, d_mu_t = noise_scheduler.add_noise(src_images, tar_images, timesteps)
 
         unet_inputs = {
-            "x": noisy_latent,
+            "x": mu_t,
             "timesteps": timesteps,
             "spacing_tensor": spacing_tensor,
         }
+
         if include_body_region:
+            top_region_index_tensor = train_data["top_region_index"].to(device)
+            bottom_region_index_tensor = train_data["bottom_region_index"].to(device)
             unet_inputs.update({
                 "top_region_index_tensor": top_region_index_tensor,
                 "bottom_region_index_tensor": bottom_region_index_tensor,
             })
+
         if include_modality:
+            modality_tensor = train_data["modality"].to(device)
+            modality_tensor = augment_modality_label(modality_tensor).to(device)
             unet_inputs.update({"class_labels": modality_tensor})
 
         # Accelerate handles mixed precision automatically if configured
         with accelerator.accumulate(unet):
             model_output = unet(**unet_inputs)
-            loss = loss_pt(model_output, model_gt)
+            loss = loss_pt(model_output, d_mu_t)
 
             # Replaced backward with accelerator
             accelerator.backward(loss)
@@ -513,6 +479,7 @@ def diff_model_train(
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(rk4_step, noise_scheduler)
+    noise_scheduler.add_noise = MethodType(linear_interpolate, noise_scheduler)
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
