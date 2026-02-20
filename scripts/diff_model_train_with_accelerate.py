@@ -464,8 +464,8 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(rk5_step, noise_scheduler)
-    noise_scheduler.add_noise = MethodType(partial(enc_dec_interpolate, add_noise=True), noise_scheduler)
+    noise_scheduler.step = MethodType(midpoint_step, noise_scheduler)
+    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False), noise_scheduler)
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
