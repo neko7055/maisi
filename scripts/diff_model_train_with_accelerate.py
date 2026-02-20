@@ -287,7 +287,7 @@ def evaluate(
             for t, next_t in zip(all_timesteps, all_next_timesteps):
                 unet_inputs = {
                     "x": mu_t,
-                    "timesteps": torch.Tensor((t,)).to(device),
+                    "timesteps": torch.Tensor((t,)).repeat(mu_t.shape[0]).to(device),
                     "spacing_tensor": spacing_tensor,
                 }
                 if include_body_region:
