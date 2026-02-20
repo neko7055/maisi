@@ -27,7 +27,7 @@ from accelerate.utils import set_seed
 from .diff_model_setting import load_config, setup_logging
 from .utils import define_instance
 from .ssim import SSIM3D
-from .solver import midpoint_step, rk4_step
+from .solver import midpoint_step, rk4_step, rk5_step
 from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
 
 class XSigmoidLoss(torch.nn.Module):
@@ -464,7 +464,8 @@ def diff_model_train(
     # mixed_precision can be "no", "fp16", "bf16".
     # It is recommended to configure this via `accelerate config` CLI or pass arg here.
     args = load_config(env_config_path, model_config_path, model_def_path)
-    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"], step_scheduler_with_optimizer=False)
+    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"],
+                              step_scheduler_with_optimizer=False)
 
 
     logger = setup_logging("training")
@@ -479,8 +480,8 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(rk4_step, noise_scheduler)
-    noise_scheduler.add_noise = MethodType(partial(triangular_interpolate, add_noise=False), noise_scheduler)
+    noise_scheduler.step = MethodType(rk5_step, noise_scheduler)
+    noise_scheduler.add_noise = MethodType(partial(enc_dec_interpolate, add_noise=True), noise_scheduler)
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
