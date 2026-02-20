@@ -26,7 +26,7 @@ from accelerate.utils import set_seed
 from .diff_model_setting import load_config, setup_logging
 from .utils import define_instance
 from .ssim import SSIM3D
-from solver import midpoint_step
+from .solver import midpoint_step, rk4_step
 
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
@@ -512,7 +512,7 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(midpoint_step, noise_scheduler)  # Replace step function with midpoint method
+    noise_scheduler.step = MethodType(rk4_step, noise_scheduler)  # Replace step function with midpoint method
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
