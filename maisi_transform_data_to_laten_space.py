@@ -68,6 +68,7 @@ def run_torchrun(module, module_args, num_gpus=1):
     ] + module_args
 
     # Set the OMP_NUM_THREADS environment variable
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
     env = os.environ.copy()
     env["OMP_NUM_THREADS"] = "1"
 
