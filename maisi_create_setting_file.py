@@ -104,13 +104,13 @@ model_config_path = os.path.join(configs_dir, "model_train_infer_config.json")
 model_def_path = os.path.join(configs_dir, "model_def.json")
 modality_mapping_path = os.path.join(configs_dir, "modality_mapping.json")
 with open(env_config_path, "w") as f:
-    json.dump(env_config_out, f, sort_keys=True, indent=4)
+    json.dump(env_config_out, f, indent=4)
 
 with open(model_config_path, "w") as f:
-    json.dump(model_config_out, f, sort_keys=True, indent=4)
+    json.dump(model_config_out, f, indent=4)
 
 with open(model_def_path, "w") as f:
-    json.dump(model_def, f, sort_keys=True, indent=4)
+    json.dump(model_def, f, indent=4)
 
 with open(modality_mapping_path, "w") as f:
-    json.dump(modality_mapping, f, sort_keys=True, indent=4)
+    json.dump(modality_mapping, f, indent=4)
