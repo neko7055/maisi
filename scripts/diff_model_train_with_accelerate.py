@@ -192,12 +192,15 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
 
     if len(tensor_list) > 0:
         all_data = torch.stack(tensor_list, dim=0)
+        Q1 = torch.quantile(all_data.to(accelerator.device), q=0.25, dim=0, keepdim=True, interpolation='linear')
+        Q2 = torch.quantile(all_data.to(accelerator.device), q=0.5, dim=0, keepdim=True, interpolation='linear')
+        Q3 = torch.quantile(all_data.to(accelerator.device), q=0.75, dim=0, keepdim=True, interpolation='linear')
         # Compute local std
-        shift_factor = torch.mean(all_data.to(accelerator.device), dim=0, keepdim=True)
-        local_std = torch.std(all_data.to(accelerator.device), dim=0, keepdim=True, unbiased=True)
+        shift_factor = Q2
+        local_iqr = Q3 - Q1
         # For simplicity in distributed setting, we might want to average the values or gather.
         # Original code reduced the scale_factor.
-        scale_factor = 1 / local_std
+        scale_factor = 1 / local_iqr
     else:
         # Fallback if a process has no data (unlikely with proper partition)
         scale_factor = torch.tensor(1.0).to(accelerator.device)
@@ -598,27 +601,27 @@ def diff_model_train(
         if accelerator.is_main_process:
             logger.info(
                 f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s")
-        if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
-            start_time = time.perf_counter()
-            eval_loss_torch = evaluate(
-                unet,
-                val_loader,
-                shift_factor,
-                scale_factor,
-                noise_scheduler,
-                accelerator,
-                logger,
-                include_body_region,
-                include_modality,
-            )
-            end_time = time.perf_counter()
-            elapsed_time = end_time - start_time
-            eval_loss_torch = eval_loss_torch.tolist()
-            eval_loss_torch_epoch = eval_loss_torch[0] / eval_loss_torch[1]
+        #if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
+        start_time = time.perf_counter()
+        eval_loss_torch = evaluate(
+            unet,
+            val_loader,
+            shift_factor,
+            scale_factor,
+            noise_scheduler,
+            accelerator,
+            logger,
+            include_body_region,
+            include_modality,
+        )
+        end_time = time.perf_counter()
+        elapsed_time = end_time - start_time
+        eval_loss_torch = eval_loss_torch.tolist()
+        eval_loss_torch_epoch = eval_loss_torch[0] / eval_loss_torch[1]
 
-            if accelerator.is_main_process:
-                logger.info(
-                    f"epoch {epoch + 1} average mse loss on validation set: {eval_loss_torch_epoch:.4f}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
+        if accelerator.is_main_process:
+            logger.info(
+                f"epoch {epoch + 1} average mse loss on validation set: {eval_loss_torch_epoch:.4f}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
 
         save_checkpoint(
             epoch,
