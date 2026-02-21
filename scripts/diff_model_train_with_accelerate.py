@@ -258,7 +258,6 @@ def evaluate(
         tar_images = eval_data["tar_image"].to(device)
 
         src_images = (src_images - shift_factor) * scale_factor
-        tar_images = (tar_images - shift_factor) * scale_factor
 
         if include_body_region:
             top_region_index_tensor = eval_data["top_region_index"].to(device)
@@ -307,7 +306,7 @@ def evaluate(
                 # Logging only on main process (simplified checks)
                 # if accelerator.is_main_process:
                 #    logger.info(...)
-
+            mu_t = mu_t * (1 / scale_factor) + shift_factor  # Un-normalize for loss calculation
             loss = torch.nn.functional.mse_loss(mu_t, tar_images, reduction='mean')
 
             loss_torch[0] += loss.item()
