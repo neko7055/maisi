@@ -30,7 +30,6 @@ env_config_out = OrderedDict()
 env_config_out["data_base_dir"] = "./sim_data_dir/data" # data path
 env_config_out["json_data_list"] = "./sim_data_dir/sim_datalist.json" # data list
 env_config_out["embedding_base_dir"] = env_config_out["data_base_dir"] + "_embeddings"
-os.makedirs(env_config_out["embedding_base_dir"], exist_ok=True)
 
 # work space setup
 env_config_out["work_dir"] = "./temp_work_dir"
