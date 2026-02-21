@@ -22,8 +22,8 @@ from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
 
 from .diff_model_setting import load_config, setup_logging
-from .interpolator import linear_interpolate
-from .solver import midpoint_step
+from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
+from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 from .ssim import SSIM3D
 from .utils import define_instance
 
@@ -470,8 +470,8 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(midpoint_step, noise_scheduler)
-    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False), noise_scheduler)
+    noise_scheduler.step = MethodType(euler_step, noise_scheduler)
+    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=True), noise_scheduler)
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
