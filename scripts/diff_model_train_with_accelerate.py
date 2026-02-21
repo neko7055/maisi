@@ -21,6 +21,7 @@ from monai.data import DataLoader, partition_dataset
 from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
 
+from .optimizer import Lion, Lookahead
 from .diff_model_setting import load_config, setup_logging
 from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
@@ -218,7 +219,9 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
-    return torch.optim.Adam(params=model.parameters(), lr=lr)
+    optimizer = Lion(model.parameters(), lr=lr)
+    optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    return optimizer
 
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int) -> torch.optim.lr_scheduler.PolynomialLR:
