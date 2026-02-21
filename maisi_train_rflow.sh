@@ -23,7 +23,7 @@ mkdir -p logs
 
 # Activate conda environment
 source ~/.bashrc
-conda activate monai
+conda activate maisi
 
 # Force Python to flush stdout/stderr immediately
 export PYTHONUNBUFFERED=1

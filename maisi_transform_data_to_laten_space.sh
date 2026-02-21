@@ -10,8 +10,6 @@
 #SBATCH --mail-type=BEGIN,END,FAIL               # send email at job start, end, and on failure
 #SBATCH --mail-user=r12946008@ntu.edu.tw        # your address
 
-SBATCH --time=1-00:00:00
-
 #SBATCH --export=ALL
 
 # Load your shared environment (if needed)
@@ -23,7 +21,7 @@ mkdir -p logs
 
 # Activate conda environment
 source ~/.bashrc
-conda activate monai
+conda activate maisi
 
 # Force Python to flush stdout/stderr immediately
 export PYTHONUNBUFFERED=1
