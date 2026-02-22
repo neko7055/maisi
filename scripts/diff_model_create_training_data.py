@@ -239,7 +239,7 @@ def diff_model_create_training_data(
 
     # ── Initialize distributed ──
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
-    logger = setup_logging("creating training data")
+    logger = setup_logging("creating training data", rk_filter=False)
     logger.info(f"Using device {device}, rank {local_rank}/{world_size}")
 
     # ── Load autoencoder ──
