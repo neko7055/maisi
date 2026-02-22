@@ -40,9 +40,7 @@ class Lion(Optimizer):
 
 
 class Lookahead(Optimizer):
-    def __init__(self, optimizer, params, defaults,
-                 alpha=0.5, k=6, pullback_momentum="none"):
-        super().__init__(params, defaults)
+    def __init__(self, optimizer, alpha=0.5, k=6, pullback_momentum="none"):
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f'Invalid slow update rate: {alpha}')
         if not 1 <= k:
