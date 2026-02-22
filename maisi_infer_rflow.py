@@ -54,7 +54,7 @@ if __name__ == "__main__":
 
     print_config()
 
-    logger = setup_logging("train_maisi_rflow")
+    logger = setup_logging("inference_maisi_rflow")
 
     # load config
     work_dir = "./temp_work_dir"
