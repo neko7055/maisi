@@ -381,7 +381,7 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
     val_loader = prepare_data(
         val_files,
         args.diffusion_unet_inference["cache_rate"],
-        batch_size=args.diffusion_unet_inference["validation_batch_size"],
+        batch_size=args.diffusion_unet_inference["batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
         modality_mapping=args.modality_mapping
