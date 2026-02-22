@@ -265,7 +265,7 @@ def run_inference(
                 device=device,
             )
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
-            datas = predict_images.cpu().detach().numpy()
+            datas = predict_images.squeeze(1).cpu().detach().numpy()
             out_spacings = eval_data["spacing"].cpu().detach().numpy()
             a_min, a_max, b_min, b_max = -1000, 1000, 0, 1
             datas = (datas - b_min) / (b_max - b_min) * (a_max - a_min) + a_min
@@ -285,7 +285,6 @@ def save_images(
         out_affine = np.eye(4)
         for i in range(3):
             out_affine[i, i] = out_spacing[i]
-
         new_image = nib.Nifti1Image(data, affine=out_affine)
         output_path = os.path.join(data_root_dir, filename)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
