@@ -22,18 +22,19 @@ import torch.distributed as dist
 from monai.utils import RankFilter
 
 
-def setup_logging(logger_name: str = "") -> logging.Logger:
+def setup_logging(logger_name: str = "", rk_filter=True) -> logging.Logger:
     """
     Setup the logging configuration.
 
     Args:
         logger_name (str): logger name.
+        rk_filter (bool): whether to add RankFilter to the logger for distributed training.
 
     Returns:
         logging.Logger: Configured logger.
     """
     logger = logging.getLogger(logger_name)
-    if dist.is_initialized():
+    if dist.is_initialized() and rk_filter:
         logger.addFilter(RankFilter())
     logging.basicConfig(
         level=logging.INFO,
