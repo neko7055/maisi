@@ -63,7 +63,7 @@ model_config_out = OrderedDict()
 
 model_config_out["transform_to_laten"] = OrderedDict()
 model_config_out["transform_to_laten"]["sw_batch_size"] = 1
-model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 48]
+model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 64]
 model_config_out["transform_to_laten"]["autoencoder_tp_num_splits"] = 1
 
 model_config_out["diffusion_unet_train"] = OrderedDict()
@@ -79,7 +79,7 @@ model_config_out["diffusion_unet_inference"] = OrderedDict()
 model_config_out["diffusion_unet_inference"]["batch_size"] = 1
 model_config_out["diffusion_unet_inference"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_inference"]["num_inference_steps"] = 5
-model_config_out["diffusion_unet_inference"]["slide_window_size"] = [64, 64, 48]
+model_config_out["diffusion_unet_inference"]["slide_window_size"] = [64, 64, 64]
 model_config_out["diffusion_unet_inference"]["autoencoder_tp_num_splits"] = 1
 model_config_out["diffusion_unet_inference"]["random_seed"] = 41
 
