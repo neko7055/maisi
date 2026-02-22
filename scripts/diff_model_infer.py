@@ -324,6 +324,10 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
     autoencoder, unet, shift_factor, scale_factor = load_models(args, device, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(euler_step, noise_scheduler)
+    noise_scheduler.set_timesteps(
+        num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
+        input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
+    )
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
