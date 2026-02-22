@@ -71,6 +71,7 @@ model_config_out["diffusion_unet_train"]["validation_batch_size"] = 8
 
 model_config_out["diffusion_unet_inference"] = OrderedDict()
 model_config_out["diffusion_unet_train"]["batch_size"] = 8
+model_config_out["diffusion_unet_train"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_train"]["num_inference_steps"] = 5
 model_config_out["diffusion_unet_train"]["random_seed"] = 41
 
