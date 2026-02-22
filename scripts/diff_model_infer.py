@@ -172,6 +172,7 @@ def prepare_data(
 
 
 def run_inference(
+        data_root_dir: str,
         unet: torch.nn.Module,
         autoencoder: torch.nn.Module,
         data_loader: DataLoader,
@@ -264,38 +265,32 @@ def run_inference(
                 device=device,
             )
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
-            data = predict_images.cpu().detach().numpy()
+            datas = predict_images.cpu().detach().numpy()
+            out_spacings = eval_data["out_spacings"].cpu().detach().numpy()
             a_min, a_max, b_min, b_max = -1000, 1000, 0, 1
-            data = (data - b_min) / (b_max - b_min) * (a_max - a_min) + a_min
-            data = np.clip(data, a_min, a_max)
+            datas = (datas - b_min) / (b_max - b_min) * (a_max - a_min) + a_min
+            datas = np.int16(np.clip(datas, a_min, a_max))
+            save_images(datas, out_spacings, eval_data["out_name"], data_root_dir, logger)
             asd / 2
-        return np.int16(data)
 
 
-def save_image(
-        data,
-        out_spacing: tuple,
-        output_path: str,
+def save_images(
+        datas,
+        out_spacings,
+        output_paths,
+        data_root_dir,
         logger: logging.Logger,
 ) -> None:
-    """
-    Save the generated synthetic image to a file.
+    for data, out_spacing, filename in zip(datas, out_spacings, output_paths):
+        out_affine = np.eye(4)
+        for i in range(3):
+            out_affine[i, i] = out_spacing[i]
 
-    Args:
-        data : Synthetic image data.
-        output_size (tuple): Output size of the image.
-        out_spacing (tuple): Spacing of the output image.
-        output_path (str): Path to save the output image.
-        logger (logging.Logger): Logger for logging information.
-    """
-    out_affine = np.eye(4)
-    for i in range(3):
-        out_affine[i, i] = out_spacing[i]
-
-    new_image = nib.Nifti1Image(data, affine=out_affine)
-    os.makedirs(os.path.dirname(output_path), exist_ok=True)
-    nib.save(new_image, output_path)
-    logger.info(f"Saved {output_path}.")
+        new_image = nib.Nifti1Image(data, affine=out_affine)
+        output_path = os.path.join(data_root_dir, filename)
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        nib.save(new_image, output_path)
+        logger.info(f"Saved {output_path}.")
 
 
 @torch.inference_mode()
@@ -399,6 +394,7 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
         save_dir = os.path.join(args.output_dir, timestamp, mode)
         os.makedirs(save_dir, exist_ok=True)
         data = run_inference(
+            save_dir,
             unet,
             autoencoder,
             train_loader,
