@@ -134,6 +134,6 @@ if __name__ == "__main__":
 
     folder_path = env_config["embedding_base_dir"]
     gz_files = list_gz_files(folder_path)
-    create_json_files(gz_files, "ct", model_def["include_body_region"])
+    create_json_files(gz_files, "ct_non_contrast_to_contrast", model_def["include_body_region"])
 
     logger.info("Completed creating .json files for all embedding files.")
