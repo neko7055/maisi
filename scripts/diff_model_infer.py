@@ -224,7 +224,7 @@ def run_inference(
         all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
 
         mu_t = src_images
-        with torch.inference_mode():
+        with torch.inference_mode() and torch.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
             for t, next_t in zip(all_timesteps, all_next_timesteps):
 
                 def model_warpper(t, x):
