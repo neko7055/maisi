@@ -251,11 +251,11 @@ def run_inference(
             mu_t = mu_t * (1 / scale_factor) + shift_factor  # Un-normalize for loss calculation
 
             inferer = SlidingWindowInferer(
-                        roi_size=[320, 320, 160],
+                        roi_size=[64, 64, 48],
                         sw_batch_size=1,
                         progress=False,
                         mode="gaussian",
-                        overlap=0.4,
+                        overlap=0.5,
                         sw_device=device,
                         device=device,
                     )
