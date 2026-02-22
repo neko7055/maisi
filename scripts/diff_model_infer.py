@@ -85,6 +85,7 @@ def load_models(args: argparse.Namespace, device: torch.device, logger: logging.
 
     return autoencoder, unet, shift_factor, scale_factor
 
+
 def load_filenames(data_list_path: str, mode: str) -> list:
     # (Same as original function)
     with open(data_list_path, "r") as file:
@@ -92,7 +93,8 @@ def load_filenames(data_list_path: str, mode: str) -> list:
     filenames_train = json_data[mode]
     return [{"src_image": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
              "tar_image": _item["tar_image"].replace(".nii.gz", "_emb.nii.gz"),
-             "file_name": _item["tar_image"].replace(".nii.gz", "_pred.nii.gz"),} for _item in filenames_train]
+             "file_name": _item["tar_image"].replace(".nii.gz", "_pred.nii.gz"), } for _item in filenames_train]
+
 
 def prepare_file_list(filenames, embedding_base_dir, mode, include_body_region, include_modality):
     # Prepare file list
@@ -116,6 +118,7 @@ def prepare_file_list(filenames, embedding_base_dir, mode, include_body_region, 
             files_i["modality"] = str_info
         files_list.append(files_i)
     return files_list
+
 
 def prepare_data(
         train_files: list,
@@ -167,18 +170,19 @@ def prepare_data(
 
     return DataLoader(train_ds, num_workers=num_workers, batch_size=batch_size, shuffle=False)
 
+
 def run_inference(
-    unet: torch.nn.Module,
-    autoencoder: torch.nn.Module,
-    data_loader: DataLoader,
-    shift_factor: torch.Tensor,
-    scale_factor: torch.Tensor,
-    noise_scheduler: torch.nn.Module,
-    slide_window_size: list[int],
-    logger: logging.Logger,
-    include_body_region,
-    include_modality,
-    device: torch.device,
+        unet: torch.nn.Module,
+        autoencoder: torch.nn.Module,
+        data_loader: DataLoader,
+        shift_factor: torch.Tensor,
+        scale_factor: torch.Tensor,
+        noise_scheduler: torch.nn.Module,
+        slide_window_size: list[int],
+        logger: logging.Logger,
+        include_body_region,
+        include_modality,
+        device: torch.device,
 ) -> np.ndarray:
     """
     Run the inference to generate synthetic images.
@@ -200,7 +204,6 @@ def run_inference(
     Returns:
         np.ndarray: Generated synthetic image data.
     """
-
 
     unet.eval()
     autoencoder.eval()
@@ -252,28 +255,28 @@ def run_inference(
             mu_t = mu_t * (1 / scale_factor) + shift_factor  # Un-normalize for loss calculation
 
             inferer = SlidingWindowInferer(
-                        roi_size=slide_window_size,
-                        sw_batch_size=1,
-                        progress=False,
-                        mode="gaussian",
-                        overlap=0.5,
-                        sw_device=device,
-                        device=device,
-                    )
+                roi_size=slide_window_size,
+                sw_batch_size=1,
+                progress=False,
+                mode="gaussian",
+                overlap=0.5,
+                sw_device=device,
+                device=device,
+            )
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
             data = predict_images.cpu().detach().numpy()
             a_min, a_max, b_min, b_max = -1000, 1000, 0, 1
             data = (data - b_min) / (b_max - b_min) * (a_max - a_min) + a_min
             data = np.clip(data, a_min, a_max)
-            asd/2
+            asd / 2
         return np.int16(data)
 
 
 def save_image(
-    data,
-    out_spacing: tuple,
-    output_path: str,
-    logger: logging.Logger,
+        data,
+        out_spacing: tuple,
+        output_path: str,
+        logger: logging.Logger,
 ) -> None:
     """
     Save the generated synthetic image to a file.
@@ -397,15 +400,16 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
         os.makedirs(save_dir, exist_ok=True)
         data = run_inference(
             unet,
-        autoencoder,
-        train_loader,
-        shift_factor,
-        scale_factor,
-        noise_scheduler,
-        logger,
-        include_body_region,
-        include_modality,
-        device
+            autoencoder,
+            train_loader,
+            shift_factor,
+            scale_factor,
+            noise_scheduler,
+            args.diffusion_unet_inference["slide_window_size"],
+            logger,
+            include_body_region,
+            include_modality,
+            device
         )
     save_image(data, output_size, out_spacing, output_path, logger)
 
@@ -416,16 +420,17 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
     if dist.is_initialized():
         dist.destroy_process_group()
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Diffusion Model Inference")
-    parser.add_argument("-e","--env_config", type=str, required=True)
-    parser.add_argument("-c","--model_config", type=str, required=True)
-    parser.add_argument("-t","--model_def", type=str, required=True)
+    parser.add_argument("-e", "--env_config", type=str, required=True)
+    parser.add_argument("-c", "--model_config", type=str, required=True)
+    parser.add_argument("-t", "--model_def", type=str, required=True)
     parser.add_argument(
         "-g",
-        "--num_gpus", 
-        type=int, 
-        default=1, 
+        "--num_gpus",
+        type=int,
+        default=1,
         help="Number of GPUs to use for training"
     )
 
