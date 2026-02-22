@@ -235,8 +235,8 @@ def diff_model_create_training_data(
     """
     # ── Load config ──
     args = load_config(env_config_path, model_config_path, model_def_path)
-    if "autoencoder_tp_num_splits" in args.diffusion_unet_inference.keys():
-        args.autoencoder_def["num_splits"] = args.diffusion_unet_inference["autoencoder_tp_num_splits"]
+    if "autoencoder_tp_num_splits" in args.transform_to_laten.keys():
+        args.autoencoder_def["num_splits"] = args.transform_to_laten["autoencoder_tp_num_splits"]
 
     # ── Initialize distributed ──
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
