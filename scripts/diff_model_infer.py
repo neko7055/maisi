@@ -357,14 +357,14 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
             data=train_files,
             shuffle=False,
             num_partitions=torch.distributed.get_world_size(),
-            even_divisible=True
+            even_divisible=False
         )[local_rank]
 
         val_files = partition_dataset(
             data=val_files,
             shuffle=False,
             num_partitions=torch.distributed.get_world_size(),
-            even_divisible=True
+            even_divisible=False
         )[local_rank]
 
     # Create DataLoader with local subset

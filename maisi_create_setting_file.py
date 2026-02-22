@@ -60,6 +60,13 @@ os.makedirs(env_config_out["output_dir"], exist_ok=True)
 
 # Update model configuration for demo
 model_config_out = OrderedDict()
+
+model_config_out["transform_to_laten"] = OrderedDict()
+model_config_out["transform_to_laten"]["batch_size"] = 1
+model_config_out["transform_to_laten"]["cache_rate"] = 1.0
+model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 48]
+model_config_out["transform_to_laten"]["autoencoder_tp_num_splits"] = 1
+
 model_config_out["diffusion_unet_train"] = OrderedDict()
 model_config_out["diffusion_unet_train"]["batch_size"] = 1
 model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 4

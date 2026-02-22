@@ -26,10 +26,20 @@ import torch.distributed as dist
 from tqdm import tqdm
 from monai.transforms import Compose
 from monai.inferers.inferer import SlidingWindowInferer
+from monai.data import DataLoader, partition_dataset
 
 from .diff_model_setting import initialize_distributed, load_config, setup_logging
 from .transforms import define_fixed_intensity_transform, SUPPORT_MODALITIES
 from .utils import define_instance, dynamic_infer
+
+def load_filenames(data_list_path: str, mode: str) -> list:
+    # (Same as original function)
+    with open(data_list_path, "r") as file:
+        json_data = json.load(file)
+    filenames_train = json_data[mode]
+    return [{"src_image": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
+             "tar_image": _item["tar_image"].replace(".nii.gz", "_emb.nii.gz"),
+             "file_name": _item["tar_image"].replace(".nii.gz", "_pred.nii.gz"), } for _item in filenames_train]
 
 
 def create_transforms(dim: tuple = None, modality: str = 'unknown') -> Compose:
@@ -130,11 +140,11 @@ def process_file(
 
                 # Forward through autoencoder's stage-2 encoder to get latent z.
                 inferer = SlidingWindowInferer(
-                    roi_size=[320, 320, 160],
+                    roi_size=[32, 32, 32], # [320, 320, 160]
                     sw_batch_size=1,
                     progress=False,
                     mode="gaussian",
-                    overlap=0.4,
+                    overlap=0.5,
                     sw_device=device,
                     device=device,
                 )
@@ -185,6 +195,29 @@ def diff_model_create_training_data(
 
     # Ensure the embeddings output base directory exists.
     Path(args.embedding_base_dir).mkdir(parents=True, exist_ok=True)
+
+    filenames_train = load_filenames(args.json_data_list, mode="training")
+    filenames_val = load_filenames(args.json_data_list, mode="validation")
+    filenames_test = load_filenames(args.json_data_list, mode="test")
+    if local_rank == 0:
+        logger.info(f"num_files_train: {len(filenames_train)}")
+        logger.info(f"num_files_val: {len(filenames_val)}")
+        logger.info(f"num_files_test: {len(filenames_test)}")
+
+    if torch.distributed.is_initialized():
+        train_files = partition_dataset(
+            data=train_files,
+            shuffle=False,
+            num_partitions=torch.distributed.get_world_size(),
+            even_divisible=False
+        )[local_rank]
+
+        val_files = partition_dataset(
+            data=val_files,
+            shuffle=False,
+            num_partitions=torch.distributed.get_world_size(),
+            even_divisible=False
+        )[local_rank]
 
     # Discover all training image file paths from JSON list.
     with open(args.json_data_list, "r") as file:

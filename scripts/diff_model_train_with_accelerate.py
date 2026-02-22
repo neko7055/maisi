@@ -510,16 +510,16 @@ def diff_model_train(
 
     val_files = partition_dataset(
         data=val_files,
-        shuffle=True,
+        shuffle=False,
         num_partitions=accelerator.num_processes,
-        even_divisible=True
+        even_divisible=False
     )[accelerator.process_index]
 
     # test_files = partition_dataset(
     #     data=test_files,
-    #     shuffle=True,
+    #     shuffle=False,
     #     num_partitions=accelerator.num_processes,
-    #     even_divisible=True
+    #     even_divisible=False
     # )[accelerator.process_index]
 
     # Calculate scale factor locally then sync
