@@ -78,7 +78,7 @@ class Lookahead(Optimizer):
         # Save both inner optimizer state and lookahead state
         return {
             'optimizer_state_dict': self.optimizer.state_dict(),
-            'lookahead_state': self.state,
+            'lookahead_state': dict(self.state),  # convert defaultdict -> dict
             'step_counter': self.step_counter
         }
 
@@ -86,7 +86,7 @@ class Lookahead(Optimizer):
         # Restore lookahead state if present; fallback for older checkpoints
         if 'lookahead_state' in state_dict:
             self.optimizer.load_state_dict(state_dict['optimizer_state_dict'])
-            self.state = state_dict['lookahead_state']
+            self.state = defaultdict(dict, state_dict['lookahead_state'])  # restore defaultdict
             self.step_counter = state_dict['step_counter']
         else:
             self.optimizer.load_state_dict(state_dict)
