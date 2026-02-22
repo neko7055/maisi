@@ -271,7 +271,6 @@ def run_inference(
             datas = (datas - b_min) / (b_max - b_min) * (a_max - a_min) + a_min
             datas = np.int16(np.clip(datas, a_min, a_max))
             save_images(datas, out_spacings, eval_data["out_name"], data_root_dir, logger)
-            asd / 2
 
 
 def save_images(
