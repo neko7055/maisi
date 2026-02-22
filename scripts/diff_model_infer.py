@@ -328,6 +328,12 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
 
+    if include_modality:
+        with open(args.modality_mapping_path, "r") as f:
+            args.modality_mapping = json.load(f)
+    else:
+        args.modality_mapping = None
+
     filenames_train = load_filenames(args.json_data_list, mode="training")
     filenames_val = load_filenames(args.json_data_list, mode="validation")
     filenames_test = load_filenames(args.json_data_list, mode="test")
@@ -361,8 +367,8 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
     # Create DataLoader with local subset
     train_loader = prepare_data(
         train_files,
-        args.diffusion_unet_train["cache_rate"],
-        batch_size=args.diffusion_unet_train["batch_size"],
+        args.diffusion_unet_inference["cache_rate"],
+        batch_size=args.diffusion_unet_inference["batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
         modality_mapping=args.modality_mapping
@@ -370,8 +376,8 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
 
     val_loader = prepare_data(
         val_files,
-        args.diffusion_unet_train["cache_rate"],
-        batch_size=args.diffusion_unet_train["validation_batch_size"],
+        args.diffusion_unet_inference["cache_rate"],
+        batch_size=args.diffusion_unet_inference["validation_batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
         modality_mapping=args.modality_mapping
