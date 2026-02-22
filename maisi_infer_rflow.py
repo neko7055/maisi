@@ -73,8 +73,8 @@ if __name__ == "__main__":
         model_def = json.load(f)
 
 
-    logger.info("Training the model...")
-    module = "scripts.diff_model_train_with_accelerate"
+    logger.info("Inference the model...")
+    module = "scripts.diff_model_infer"
     module_args = [
         "--env_config",
         env_config_path,
