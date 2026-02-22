@@ -70,10 +70,10 @@ model_config_out["diffusion_unet_train"]["validation_num_steps"] = 5
 model_config_out["diffusion_unet_train"]["validation_batch_size"] = 8
 
 model_config_out["diffusion_unet_inference"] = OrderedDict()
-model_config_out["diffusion_unet_train"]["batch_size"] = 8
-model_config_out["diffusion_unet_train"]["cache_rate"] = 1.0
-model_config_out["diffusion_unet_train"]["num_inference_steps"] = 5
-model_config_out["diffusion_unet_train"]["random_seed"] = 41
+model_config_out["diffusion_unet_inference"]["batch_size"] = 8
+model_config_out["diffusion_unet_inference"]["cache_rate"] = 1.0
+model_config_out["diffusion_unet_inference"]["num_inference_steps"] = 5
+model_config_out["diffusion_unet_inference"]["random_seed"] = 41
 
 model_config_out["dino_finetune"] = OrderedDict()
 model_config_out["dino_finetune"]["batch_size"] = 4
