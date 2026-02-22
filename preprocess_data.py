@@ -119,7 +119,7 @@ if __name__ == "__main__":
         datasave_dir = os.path.join(dataroot_dir, mode)
         for fileID in json_data[mode]:
             matched_files = filter(lambda x: x["fileID"] == fileID, gz_files)
-            data_list = {"src_image": "", "tar_image": "", "modality": "ct"}
+            data_list = {"src_image": "", "tar_image": "", "modality": "ct_non_contrast_to_contrast"}
             for f in matched_files:
                 filename = os.path.basename(f["filepath"])
                 # the resized file now lives in datasave_dir/filename
