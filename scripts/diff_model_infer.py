@@ -210,7 +210,7 @@ def run_inference(
     autoencoder.eval()
 
     # Iterate over loader
-    for eval_data in data_loader:
+    for eval_data in tqdm(data_loader, desc=f"Running inference on device {device}"):
 
         src_images = eval_data["src_image"].to(device)
         tar_images = eval_data["tar_image"].to(device)
