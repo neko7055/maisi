@@ -26,20 +26,10 @@ import torch.distributed as dist
 from tqdm import tqdm
 from monai.transforms import Compose
 from monai.inferers.inferer import SlidingWindowInferer
-from monai.data import DataLoader, partition_dataset
 
 from .diff_model_setting import initialize_distributed, load_config, setup_logging
 from .transforms import define_fixed_intensity_transform, SUPPORT_MODALITIES
 from .utils import define_instance, dynamic_infer
-
-def load_filenames(data_list_path: str, mode: str) -> list:
-    # (Same as original function)
-    with open(data_list_path, "r") as file:
-        json_data = json.load(file)
-    filenames_train = json_data[mode]
-    return [{"src_image": _item["src_image"].replace(".nii.gz", "_emb.nii.gz"),
-             "tar_image": _item["tar_image"].replace(".nii.gz", "_emb.nii.gz"),
-             "file_name": _item["tar_image"].replace(".nii.gz", "_pred.nii.gz"), } for _item in filenames_train]
 
 
 def create_transforms(dim: tuple = None, modality: str = 'unknown') -> Compose:
@@ -57,13 +47,13 @@ def create_transforms(dim: tuple = None, modality: str = 'unknown') -> Compose:
         modality = 'mri'
     if 'ct' in modality:
         modality = 'ct'
-    
-    if modality in SUPPORT_MODALITIES:        
+
+    if modality in SUPPORT_MODALITIES:
         intensity_transforms = define_fixed_intensity_transform(modality=modality,
                                                                 image_keys=keys)
     else:
         intensity_transforms = []
-    
+
     if dim:
         return Compose(
             [
@@ -71,7 +61,7 @@ def create_transforms(dim: tuple = None, modality: str = 'unknown') -> Compose:
                 monai.transforms.EnsureChannelFirstd(keys=keys),
                 monai.transforms.Orientationd(keys=keys, axcodes="RAS"),
                 monai.transforms.EnsureTyped(keys=keys, dtype=torch.float32)
-            ]+intensity_transforms+[
+            ] + intensity_transforms + [
                 monai.transforms.Resized(keys=keys, spatial_size=dim, mode="trilinear"),
             ]
         )
@@ -82,18 +72,18 @@ def create_transforms(dim: tuple = None, modality: str = 'unknown') -> Compose:
                 monai.transforms.EnsureChannelFirstd(keys=keys),
                 monai.transforms.Orientationd(keys=keys, axcodes="RAS"),
                 monai.transforms.EnsureTyped(keys=keys, dtype=torch.float32),
-            ] +intensity_transforms
+            ] + intensity_transforms
         )
 
 
 def process_file(
-    files_raw: dict,
-    args: argparse.Namespace,
-    autoencoder: torch.nn.Module,
-    device: torch.device,
-    data_transforms: Compose,
-    data_type: str,
-    logger: logging.Logger
+        files_raw: dict,
+        args: argparse.Namespace,
+        autoencoder: torch.nn.Module,
+        device: torch.device,
+        data_transforms: Compose,
+        data_type: str,
+        logger: logging.Logger
 ) -> None:
     """
     Process a single file to create training data.
@@ -109,19 +99,17 @@ def process_file(
     """
     # Build output embedding filename alongside input stem; skip if it already exists.
     out_filename = {"src_image": "", "tar_image": ""}
-    #out_filename_std = {"src_image": "", "tar_image": ""}
     for key in ["src_image", "tar_image"]:
         out_filename_base = files_raw[key].replace(".gz", "").replace(".nii", "")
         out_filename_base = os.path.join(args.embedding_base_dir, data_type, out_filename_base)
         out_filename[key] = out_filename_base + "_emb.nii.gz"
-        #out_filename_std[key] = out_filename_base + "_emb_std.npy"
 
     if os.path.isfile(out_filename["src_image"]) and os.path.isfile(out_filename["tar_image"]):
         return
 
     # Wrap input path into MONAI dict format.
-    files_raw["src_image"] = os.path.join(args.data_base_dir,data_type, files_raw["src_image"])
-    files_raw["tar_image"] = os.path.join(args.data_base_dir,data_type, files_raw["tar_image"])
+    files_raw["src_image"] = os.path.join(args.data_base_dir, data_type, files_raw["src_image"])
+    files_raw["tar_image"] = os.path.join(args.data_base_dir, data_type, files_raw["tar_image"])
 
     # Apply baseline transforms to read metadata like dim/spacing from original.
     transformed_data = data_transforms(files_raw)
@@ -136,12 +124,13 @@ def process_file(
             # Mixed precision for encode pass (CUDA AMP); reduces memory/bandwidth.
             with torch.amp.autocast("cuda"):
                 # Move preprocessed volume to device, add batch and channel dims -> [1,1,X,Y,Z]
-                pt_nda = torch.from_numpy(transformed_data[key].numpy().squeeze()).float().to(device).unsqueeze(0).unsqueeze(0)
+                pt_nda = torch.from_numpy(transformed_data[key].numpy().squeeze()).float().to(device).unsqueeze(
+                    0).unsqueeze(0)
 
                 # Forward through autoencoder's stage-2 encoder to get latent z.
                 inferer = SlidingWindowInferer(
-                    roi_size=[32, 32, 32], # [320, 320, 160]
-                    sw_batch_size=1,
+                    roi_size=args.transform_to_laten["slide_window_size"],
+                    sw_batch_size=args.transform_to_laten["sw_batch_size"],
                     progress=False,
                     mode="gaussian",
                     overlap=0.5,
@@ -154,10 +143,8 @@ def process_file(
 
                 # Convert latent to NumPy, permute to [X,Y,Z,C], and save as NIfTI with the new affine.
                 out_nda = z_mu.squeeze().cpu().detach().numpy().transpose(1, 2, 3, 0)
-                #out_nda_std = z_sigma.squeeze().cpu().detach().numpy().transpose(1, 2, 3, 0)
                 out_img = nib.Nifti1Image(np.float32(out_nda), affine=transformed_data[key].meta["affine"].numpy())
                 nib.save(out_img, out_filename[key])
-                #np.save(out_filename_std[key], np.float32(out_nda_std))
     except Exception as e:
         # Log and continue; do not crash the whole job on a single failure.
         logger.error(f"Error processing {files_raw[key]}: {e}")
@@ -166,7 +153,7 @@ def process_file(
 
 @torch.inference_mode()
 def diff_model_create_training_data(
-    env_config_path: str, model_config_path: str, model_def_path: str, num_gpus: int
+        env_config_path: str, model_config_path: str, model_def_path: str, num_gpus: int
 ) -> None:
     """
     Create training data for the diffusion model.
@@ -178,6 +165,8 @@ def diff_model_create_training_data(
     """
     # Load merged config (env + model + definitions).
     args = load_config(env_config_path, model_config_path, model_def_path)
+    if "autoencoder_tp_num_splits" in args.diffusion_unet_inference.keys():
+        args.autoencoder_def["num_splits"] = args.diffusion_unet_inference["autoencoder_tp_num_splits"]
 
     # Initialize (potential) distributed environment; returns rank/world/device.
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
@@ -196,29 +185,6 @@ def diff_model_create_training_data(
     # Ensure the embeddings output base directory exists.
     Path(args.embedding_base_dir).mkdir(parents=True, exist_ok=True)
 
-    filenames_train = load_filenames(args.json_data_list, mode="training")
-    filenames_val = load_filenames(args.json_data_list, mode="validation")
-    filenames_test = load_filenames(args.json_data_list, mode="test")
-    if local_rank == 0:
-        logger.info(f"num_files_train: {len(filenames_train)}")
-        logger.info(f"num_files_val: {len(filenames_val)}")
-        logger.info(f"num_files_test: {len(filenames_test)}")
-
-    if torch.distributed.is_initialized():
-        train_files = partition_dataset(
-            data=train_files,
-            shuffle=False,
-            num_partitions=torch.distributed.get_world_size(),
-            even_divisible=False
-        )[local_rank]
-
-        val_files = partition_dataset(
-            data=val_files,
-            shuffle=False,
-            num_partitions=torch.distributed.get_world_size(),
-            even_divisible=False
-        )[local_rank]
-
     # Discover all training image file paths from JSON list.
     with open(args.json_data_list, "r") as file:
         json_data = json.load(file)
@@ -229,14 +195,12 @@ def diff_model_create_training_data(
 
         logger.info(f"filenames_raw: {files_raw}")
 
-
         # Static work partitioning over files: each rank processes files where idx % world_size == local_rank.
         for _iter in tqdm(range(len(files_raw))):
             if _iter % world_size != local_rank:
                 continue
 
             modality = files_raw[_iter]["modality"]
-
 
             # Build the transform pipeline that includes resizing to new_dim.
             # NOTE: 'modality' is referenced here but not defined in this scope; caller must ensure it's available
@@ -271,15 +235,15 @@ if __name__ == "__main__":
     )
     parser.add_argument(
         "-t",
-        "--model_def", 
-        type=str, 
-        default="./configs/config_maisi.json", 
+        "--model_def",
+        type=str,
+        default="./configs/config_maisi.json",
         help="Path to model definition file")
     parser.add_argument(
         "-g",
-        "--num_gpus", 
-        type=int, 
-        default=1, 
+        "--num_gpus",
+        type=int,
+        default=1,
         help="Number of GPUs to use for training"
     )
 

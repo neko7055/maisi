@@ -62,8 +62,7 @@ os.makedirs(env_config_out["output_dir"], exist_ok=True)
 model_config_out = OrderedDict()
 
 model_config_out["transform_to_laten"] = OrderedDict()
-model_config_out["transform_to_laten"]["batch_size"] = 1
-model_config_out["transform_to_laten"]["cache_rate"] = 1.0
+model_config_out["transform_to_laten"]["sw_batch_size"] = 1
 model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 48]
 model_config_out["transform_to_laten"]["autoencoder_tp_num_splits"] = 1
 
