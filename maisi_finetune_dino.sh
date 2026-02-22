@@ -23,7 +23,7 @@ mkdir -p logs
 
 # Activate conda environment
 source ~/.bashrc
-conda activate maisi
+source .ven/bin/activate
 
 # Force Python to flush stdout/stderr immediately
 export PYTHONUNBUFFERED=1
@@ -42,7 +42,7 @@ echo "Using conda env: $(conda info --envs | grep monai)"
 # Run the training script
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 1 > ./logs/gpu_log_dino.csv & MONITOR_PID=$!
 start_time=$(date +%s)
-python maisi_finetune_dino.py
+uv run maisi_finetune_dino.py
 end_time=$(date +%s)
 echo "Job finished at $(date)"
 kill $MONITOR_PID

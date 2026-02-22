@@ -23,14 +23,14 @@ mkdir -p logs
 
 # Activate conda environment
 source ~/.bashrc
-conda activate maisi
+source .ven/bin/activate
 
 # Force Python to flush stdout/stderr immediately
 export PYTHONUNBUFFERED=1
 
 # Run the training script
 start_time=$(date +%s)
-python preprocess_data.py
+uv run preprocess_data.py
 end_time=$(date +%s)
 echo "Job finished at $(date)"
 

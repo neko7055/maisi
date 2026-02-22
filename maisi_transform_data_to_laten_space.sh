@@ -21,7 +21,7 @@ mkdir -p logs
 
 # Activate conda environment
 source ~/.bashrc
-conda activate maisi
+source .ven/bin/activate
 
 # Force Python to flush stdout/stderr immediately
 export PYTHONUNBUFFERED=1
@@ -39,7 +39,7 @@ echo "Using conda env: $(conda info --envs | grep monai)"
 
 # Run the training script
 start_time=$(date +%s)
-python maisi_transform_data_to_laten_space.py
+uv run maisi_transform_data_to_laten_space.py
 end_time=$(date +%s)
 echo "Job finished at $(date)"
 
