@@ -174,6 +174,7 @@ def run_inference(
     shift_factor: torch.Tensor,
     scale_factor: torch.Tensor,
     noise_scheduler: torch.nn.Module,
+    slide_window_size: list[int],
     logger: logging.Logger,
     include_body_region,
     include_modality,
@@ -251,7 +252,7 @@ def run_inference(
             mu_t = mu_t * (1 / scale_factor) + shift_factor  # Un-normalize for loss calculation
 
             inferer = SlidingWindowInferer(
-                        roi_size=[64, 64, 48],
+                        roi_size=slide_window_size,
                         sw_batch_size=1,
                         progress=False,
                         mode="gaussian",
@@ -305,6 +306,8 @@ def diff_model_infer(env_config_path: str, model_config_path: str, model_def_pat
         model_def_path (str): Path to the model definition file.
     """
     args = load_config(env_config_path, model_config_path, model_def_path)
+    if "autoencoder_tp_num_splits" in args.diffusion_unet_inference.keys():
+        args.autoencoder_def["num_splits"] = args.diffusion_unet_inference["autoencoder_tp_num_splits"]
     local_rank, world_size, device = initialize_distributed(num_gpus)
     logger = setup_logging("inference")
     random_seed = set_random_seed(
