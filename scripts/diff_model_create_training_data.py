@@ -25,6 +25,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.distributed as dist
+import torch_tensorrt
 from tqdm import tqdm
 from monai.data import partition_dataset
 from monai.transforms import Compose
