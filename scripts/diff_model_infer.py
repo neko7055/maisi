@@ -667,7 +667,7 @@ def diff_model_infer(
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
     # ── 非同步 I/O 執行緒池 ──
-    io_executor = ThreadPoolExecutor(max_workers=4)
+    io_executor = ThreadPoolExecutor(max_workers=12)
 
     try:
         # 修正: 原始碼 data = run_inference(...) 但函式無回傳值

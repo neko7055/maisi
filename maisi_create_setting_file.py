@@ -65,6 +65,9 @@ model_config_out["transform_to_laten"] = OrderedDict()
 model_config_out["transform_to_laten"]["sw_batch_size"] = 1
 model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 64]
 model_config_out["transform_to_laten"]["autoencoder_tp_num_splits"] = 1
+model_config_out["transform_to_laten"]["modality"] = "ct_non_contrast_to_contrast"
+model_config_out["transform_to_laten"]["cache_rate"] = 1.0
+model_config_out["transform_to_laten"]["num_workers"] = 8
 
 model_config_out["diffusion_unet_train"] = OrderedDict()
 model_config_out["diffusion_unet_train"]["batch_size"] = 1
