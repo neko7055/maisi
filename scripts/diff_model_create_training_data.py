@@ -254,9 +254,9 @@ def diff_model_create_training_data(
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     autoencoder.eval()
-
-    logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
     autoencoder = torch.compile(autoencoder, mode="max-autotune", fullgrap=True, dynamic=False)
+    autoencoder.eval()
+    logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
     # ── Ensure output dirs exist ──
     Path(args.embedding_base_dir).mkdir(parents=True, exist_ok=True)
 
