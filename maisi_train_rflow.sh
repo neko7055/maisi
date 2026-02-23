@@ -26,7 +26,7 @@ mkdir -p logs
 
 # Activate conda environment
 source "$HOME/.bashrc"
-source .ven/bin/activate
+source .venv/bin/activate
 
 # Force Python to flush stdout/stderr immediately
 export PYTHONUNBUFFERED=1
