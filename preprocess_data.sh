@@ -25,7 +25,7 @@ cd "$SCRIPT_DIR" || { echo "切換目錄失敗: $SCRIPT_DIR"; exit 1; }
 mkdir -p logs
 
 # Activate conda environment
-source ~/.bashrc
+source "$HOME/.bashrc"
 source .ven/bin/activate
 
 # Force Python to flush stdout/stderr immediately
