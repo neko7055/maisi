@@ -5,7 +5,6 @@ requires-python = ">=3.11"
 dependencies = [
   "torch",
   "torchvision",
-  "torch-tensorrt",
   "numpy",
   "tqdm",
   "wheel-stub",

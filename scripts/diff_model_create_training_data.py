@@ -25,7 +25,6 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.distributed as dist
-import torch_tensorrt
 from tqdm import tqdm
 from monai.data import partition_dataset
 from monai.transforms import Compose
@@ -255,8 +254,12 @@ def diff_model_create_training_data(
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     autoencoder.eval()
-    autoencoder = torch.compile(autoencoder, mode="max-autotune", fullgraph=True, dynamic=False, backend="tensorrt")
-    autoencoder.eval()
+    autoencoder = torch.compile(autoencoder,
+                                mode="max-autotune",
+                                fullgraph=True,
+                                dynamic=False,
+                                backend="inductor",
+                                options={"triton.cudagraphs": True})
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
     # ── Ensure output dirs exist ──
     Path(args.embedding_base_dir).mkdir(parents=True, exist_ok=True)
