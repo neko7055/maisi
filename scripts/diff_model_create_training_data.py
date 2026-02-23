@@ -241,6 +241,9 @@ def diff_model_create_training_data(
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
     logger = setup_logging("creating training data", rk_filter=False)
     logger.info(f"Using device {device}, rank {local_rank}/{world_size}")
+    logger.info(f"Slide Window Size: {args.transform_to_laten['slide_window_size']}")
+    logger.info(f"SW Batch Size: {args.transform_to_laten['sw_batch_size']}")
+    logger.info(f"autoencoder_tp_num_splits: {args.transform_to_laten['autoencoder_tp_num_splits']}")
 
     # ── Load autoencoder ──
     autoencoder = define_instance(args, "autoencoder_def").to(device)
@@ -251,9 +254,7 @@ def diff_model_create_training_data(
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     autoencoder.eval()
-    logger.info(f"Slide Window Size: {args.transform_to_laten['slide_window_size']}")
-    logger.info(f"SW Batch Size: {args.transform_to_laten['sw_batch_size']}")
-    logger.info(f"autoencoder_tp_num_splits: {args.transform_to_laten['autoencoder_tp_num_splits']}")
+
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
 
     # ── Ensure output dirs exist ──
@@ -272,6 +273,7 @@ def diff_model_create_training_data(
         overlap=0.5,
         sw_device=device,
         device=device,
+        cache_roi_weight_map=True
     )
 
     # ── 優化: ThreadPoolExecutor 非同步 I/O ──
