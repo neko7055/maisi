@@ -202,7 +202,7 @@ def process_single_item(
                 logger.info(f"{key}, z_mu: {z_mu.size()}, {z_mu.dtype}")
 
             # 立即移到 CPU 釋放 GPU 記憶體
-            out_nda = z_mu.squeeze().cpu().detach().numpy().transpose(1, 2, 3, 0)
+            out_nda = z_mu.float().squeeze().cpu().detach().numpy().transpose(1, 2, 3, 0)
             affine = transformed_data[key].meta["affine"].numpy()
 
             # 主動釋放 GPU tensor
