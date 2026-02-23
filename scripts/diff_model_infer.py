@@ -720,6 +720,5 @@ if __name__ == "__main__":
         help="Number of GPUs to use for inference",
     )
     args = parser.parse_args()
-    diff_model_infer(
-        args.env_config, args.model_config, args.model_def, args.num_gpus
+    diff_model_infer(args.env_config, args.model_config, args.model_def, args.num_gpus)
 
