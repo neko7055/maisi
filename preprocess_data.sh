@@ -37,4 +37,4 @@ echo "Job finished at $(date)"
 duration=$((end_time - start_time))
 minutes=$((duration / 60))
 seconds=$((duration % 60))
-echo "執行時間: ${minutes} 分鐘 ${seconds} 秒"
+echo "Execution time: ${minutes} minutes ${seconds} seconds"

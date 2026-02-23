@@ -37,7 +37,6 @@ echo "Master Port set to: $MASTER_PORT"
 # Show some diagnostics at start
 echo "Job started on $(hostname) at $(date)"
 nvidia-smi
-echo "Using conda env: $(conda info --envs | grep monai)"
 
 # Run the training script
 nvidia-smi --query-gpu=timestamp,index,utilization.gpu,memory.used --format=csv -l 1 > ./logs/gpu_log_dino.csv & MONITOR_PID=$!
@@ -49,4 +48,4 @@ kill $MONITOR_PID
 duration=$((end_time - start_time))
 minutes=$((duration / 60))
 seconds=$((duration % 60))
-echo "執行時間: ${minutes} 分鐘 ${seconds} 秒"
+echo "Execution time: ${minutes} minutes ${seconds} seconds"
