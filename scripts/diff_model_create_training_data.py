@@ -17,6 +17,7 @@ import logging
 import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, Future
+from functools import partial
 from typing import Optional
 
 import monai
@@ -38,22 +39,10 @@ from .utils import define_instance, dynamic_infer
 # Transform 建立
 # ═══════════════════════════════════════════════════════════════════════════════
 
-
-def create_data_transforms(modality: str = "unknown") -> Compose:
-    """
-    建立統一的資料前處理 pipeline，所有資料共用同一個 modality。
-
-    與原始碼差異：
-      - 原始碼在 process_single_item 中每個 item 各建立一次 transforms
-      - 現在統一建立一次，供 CacheDataset 使用
-      - 保留 affine metadata（LoadImaged 預設行為）
-
-    Args:
-        modality: 資料模態，用於選擇對應的強度變換。
-
-    Returns:
-        Compose: 組合後的 MONAI transforms。
-    """
+def create_data_transforms(data_type,
+                           data_base_dir,
+                           embedding_base_dir,
+                           modality: str = "unknown") -> Compose:
     keys = ["src_image", "tar_image"]
 
     # 正規化 modality 字串
@@ -69,25 +58,94 @@ def create_data_transforms(modality: str = "unknown") -> Compose:
     else:
         intensity_transforms = []
 
+    def _build_out_path(filename_str: str):
+        """純字串操作：將原始檔名轉為 embedding 輸出路徑。"""
+        out_base = filename_str.replace(".gz", "").replace(".nii", "")
+        return os.path.join(embedding_base_dir, data_type, out_base + "_emb.nii.gz")
+
+    def _build_full_path(filename_str: str):
+        """純字串操作：將相對路徑拼接為完整的檔案路徑。"""
+        return os.path.join(data_base_dir, data_type, filename_str)
+
+    def _load_nifti(filepath: str):
+        """
+        用 nibabel 載入 NIfTI，回傳純 torch.Tensor（CPU, float32）。
+        自動處理 channel dimension：
+          - (X, Y, Z)    → (1, X, Y, Z)
+          - (X, Y, Z, C) → (C, X, Y, Z)
+        輸出已為 RAS 方向（nibabel 預設以 header 中的方向載入，
+        若需強制 RAS，使用 nibabel.as_closest_canonical）。
+        """
+        img = nib.load(filepath)
+        # 強制轉為 RAS（closest canonical）
+        img = nib.as_closest_canonical(img)
+        return img
+
+
+    def _read_affine(img) -> np.ndarray:
+        """用 nibabel 直接從 NIfTI 檔案讀取 affine matrix，不使用 MetaTensor。"""
+        try:
+            return img.affine.astype(np.float64)
+        except Exception as e:
+            return np.eye(4).astype(np.float64)
+
+    def _nifti_as_tensor(img)-> torch.Tensor:
+        """
+        用 nibabel 載入 NIfTI，回傳純 torch.Tensor（CPU, float32）。
+        自動處理 channel dimension：
+          - (X, Y, Z)    → (1, X, Y, Z)
+          - (X, Y, Z, C) → (C, X, Y, Z)
+        輸出已為 RAS 方向（nibabel 預設以 header 中的方向載入，
+        若需強制 RAS，使用 nibabel.as_closest_canonical）。
+        """
+        data = np.asarray(img.dataobj, dtype=np.float32)
+
+        if data.ndim == 3:
+            # (X, Y, Z) → (1, X, Y, Z)
+            data = data[np.newaxis, ...]
+        elif data.ndim == 4:
+            # (X, Y, Z, C) → (C, X, Y, Z)
+            data = data.transpose(3, 0, 1, 2)
+
+        return torch.as_tensor(data, dtype=torch.float32)
+
     base_transforms = [
-        monai.transforms.LoadImaged(keys=keys),
-        monai.transforms.EnsureChannelFirstd(keys=keys),
-        monai.transforms.Orientationd(keys=keys, axcodes="RAS"),
-        monai.transforms.EnsureTyped(keys=keys, dtype=torch.float32),
+        monai.transforms.Lambdad(
+            keys=keys,
+            func=_build_out_path,
+            overwrite=["src_out_path", "tar_out_path"],
+        ),
+        monai.transforms.Lambdad(
+            keys=keys,
+            func=_build_full_path,
+            overwrite=True,
+        ),
+        monai.transforms.Lambdad(
+            keys=keys,
+            func=_load_nifti,
+            overwrite=True,
+        ),
+        monai.transforms.Lambdad(
+            keys=keys,
+            func=_read_affine,
+            overwrite=["src_affine", "tar_affine"],
+        ),
+        monai.transforms.Lambdad(
+            keys=keys,
+            func=_nifti_as_tensor,
+            overwrite=True,
+        ),
     ]
 
     return Compose(base_transforms + intensity_transforms)
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 檔案清單建構
 # ═══════════════════════════════════════════════════════════════════════════════
 
-
 def build_file_list(
         json_data: dict,
         data_type: str,
-        data_base_dir: str,
         embedding_base_dir: str,
         logger: logging.Logger,
 ) -> tuple[list[dict], int]:
@@ -119,24 +177,16 @@ def build_file_list(
 
         file_list.append(
             {
-                "src_image": os.path.join(
-                    data_base_dir, data_type, item["src_image"]
-                ),
-                "tar_image": os.path.join(
-                    data_base_dir, data_type, item["tar_image"]
-                ),
-                "src_out_path": src_out,
-                "tar_out_path": tar_out,
+                "src_image": item["src_image"],
+                "tar_image": item["tar_image"],
             }
         )
 
     return file_list, skipped
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # DataLoader 建立（參考 diff_model_infer.py 的 prepare_data）
 # ═══════════════════════════════════════════════════════════════════════════════
-
 
 def prepare_data(
         file_list: list[dict],
@@ -188,113 +238,18 @@ def prepare_data(
         persistent_workers=use_persistent,
     )
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 非同步 I/O（與原始碼一致）
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def save_embedding_async(
-        executor: ThreadPoolExecutor,
-        out_nda: np.ndarray,
-        affine: np.ndarray,
-        out_path: str,
-        logger: logging.Logger,
-) -> Future:
-    """
-    使用線程池非同步保存 NIfTI 檔案，讓 GPU 不需等待磁碟 I/O。
-    """
-
-    def _save():
-        try:
-            Path(out_path).parent.mkdir(parents=True, exist_ok=True)
-            out_img = nib.Nifti1Image(np.float32(out_nda), affine=affine)
-            nib.save(out_img, out_path)
-            logger.info(f"Saved {out_path}.")
-        except Exception as e:
-            logger.error(f"Error saving {out_path}: {e}")
-
-    return executor.submit(_save)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 單一影像 Encode（從 batch 資料中處理）
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-def encode_and_save(
-        args: argparse.Namespace,
-        image_tensor: torch.Tensor,
-        affine: np.ndarray,
-        out_path: str,
-        autoencoder: torch.nn.Module,
-        device: torch.device,
-        inferer: SlidingWindowInferer,
-        io_executor: ThreadPoolExecutor,
-        logger: logging.Logger,
-) -> Optional[Future]:
-    """
-    對單一影像 tensor 執行 autoencoder encode 並非同步寫入磁碟。
-
-    與原始碼 process_single_item 差異：
-      - 不再負責 transform（已由 DataLoader 完成）
-      - 接收已前處理的 tensor，只做 encode + save
-      - 個別檔案層級的 skip 檢查仍保留
-
-    Args:
-        image_tensor: 前處理後的影像 tensor [C, X, Y, Z]。
-        affine: 影像的 affine matrix。
-        out_path: 輸出 NIfTI 路徑。
-        autoencoder: 已載入權重的 autoencoder。
-        device: CUDA 裝置。
-        inferer: 預建的 SlidingWindowInferer。
-        io_executor: 非同步 I/O 線程池。
-        logger: Logger。
-
-    Returns:
-        非同步 I/O Future，若跳過則回傳 None。
-    """
-    # 個別檔案可能其中一個已存在（src 存在但 tar 不存在的情況）
-    if os.path.isfile(out_path):
-        logger.info(f"Skipping {out_path}, already exists.")
-        return None
-
+def img_save(out_nda, out_path, out_affine, logger):
     try:
-        with torch.amp.autocast("cuda", dtype=torch.float16):
-            # image_tensor 來自 DataLoader: [C, X, Y, Z]
-            # autoencoder 需要 [B, C, X, Y, Z]
-            pt_nda = image_tensor.float().to(device).unsqueeze(0)
-
-            sw_size = args.transform_to_laten["slide_window_size"]
-            if (
-                    pt_nda.shape[2] <= sw_size[0]
-                    or pt_nda.shape[3] <= sw_size[1]
-                    or pt_nda.shape[4] <= sw_size[2]
-            ):
-                z_mu, _ = autoencoder.encode(pt_nda)
-            else:
-                z_mu, _ = dynamic_infer(inferer, autoencoder.encode, pt_nda)
-
-            logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
-
-        # 立即移到 CPU 釋放 GPU 記憶體
-        out_nda = z_mu.float().squeeze().cpu().numpy().transpose(1, 2, 3, 0)
-
-        # 主動釋放 GPU tensor
-        del pt_nda, z_mu
-
-        # 非同步寫入磁碟
-        return save_embedding_async(io_executor, out_nda, affine, out_path, logger)
-
+        Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+        out_img = nib.Nifti1Image(np.float32(out_nda), affine=out_affine)
+        nib.save(out_img, out_path)
+        logger.info(f"Saved {out_path}.")
     except Exception as e:
-        logger.error(f"Error encoding for {out_path}: {e}")
-        return None
-
+        logger.error(f"Error saving {out_path}: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 批次處理（DataLoader batch → encode + save）
 # ═══════════════════════════════════════════════════════════════════════════════
-
 
 def process_batch(
         args: argparse.Namespace,
@@ -305,62 +260,21 @@ def process_batch(
         io_executor: ThreadPoolExecutor,
         logger: logging.Logger,
 ) -> list[Future]:
-    """
-    處理 DataLoader 產出的一個 batch。
-
-    由於醫學影像尺寸可能不一致，batch_size 通常為 1。
-    對 batch 中每個 sample 的 src_image 和 tar_image 分別 encode。
-
-    Args:
-        batch_data: DataLoader 產出的 dict，包含 tensor 和 metadata。
-        autoencoder: 已載入權重的 autoencoder。
-        device: CUDA 裝置。
-        inferer: 預建的 SlidingWindowInferer。
-        io_executor: 非同步 I/O 線程池。
-        logger: Logger。
-
-    Returns:
-        非同步 I/O Future 列表。
-    """
-    futures = []
-    batch_size = batch_data["src_image"].shape[0]
-
-    for i in range(batch_size):
-        for img_key, out_key in [
-            ("src_image", "src_out_path"),
-            ("tar_image", "tar_out_path"),
-        ]:
-            image_tensor = batch_data[img_key][i]  # [C, X, Y, Z]
-
-            # 取得 affine：LoadImaged 會將 affine 存在 meta 中
-            # CacheDataset + DataLoader 會保留 MetaTensor 的 meta
-            if hasattr(image_tensor, "meta") and "affine" in image_tensor.meta:
-                affine = image_tensor.meta["affine"].numpy()
-            else:
-                # fallback: 單位矩陣
-                logger.warning(
-                    f"No affine found for {img_key}[{i}], using identity."
-                )
-                affine = np.eye(4)
-
-            # DataLoader batch 中 out_path 是 list of str
-            out_path = batch_data[out_key][i]
-
-            fut = encode_and_save(
-                args,
-                image_tensor,
-                affine,
-                out_path,
-                autoencoder,
-                device,
-                inferer,
-                io_executor,
-                logger,
-            )
-            if fut is not None:
-                futures.append(fut)
-
-    return futures
+    all_futures = []
+    for key in ("src", "tar"):
+        pt_nda = batch_data[f"{key}_image"].to(device) # size: [B, C, X, Y, Z]
+        with torch.amp.autocast("cuda", dtype=torch.float16):
+            z_mu, z_log_var = dynamic_infer(inferer, autoencoder.encode, pt_nda)
+            logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
+        out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1) # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
+        # 主動釋放 GPU tensor
+        del pt_nda, z_mu, z_log_var
+        futures = [
+            io_executor.submit(partial(img_save, logger=logger), a, b, c)
+            for a, b, c in zip(out_ndas, batch_data[f"{key}_out_path"], batch_data[f"{key}_affine"])
+        ]
+        all_futures.extend(futures)
+    return all_futures
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -421,7 +335,7 @@ def diff_model_create_training_data(
     autoencoder = torch.compile(
         autoencoder,
         mode="max-autotune",
-        fullgraph=True,
+        fullgraph=False,
         dynamic=False,
         backend="inductor",
     )
@@ -436,11 +350,10 @@ def diff_model_create_training_data(
 
     # ── 讀取統一 modality（所有資料共用）──
     # 從 config 中取得，若未指定則 fallback 為 "unknown"
-    global_modality = getattr(args.transform_to_laten, "modality", "unknown")
+    global_modality = args.transform_to_laten.get("modality", "unknown")
     logger.info(f"Modality for transforms: {global_modality}")
 
-    # ── 統一建立 transforms（一次建立，所有資料共用）──
-    data_transforms = create_data_transforms(modality=global_modality)
+
 
     # ── 優化: 預建 SlidingWindowInferer，避免每個檔案重建 ──
     inferer = SlidingWindowInferer(
@@ -460,7 +373,7 @@ def diff_model_create_training_data(
     # ── DataLoader 設定（參考 diff_model_infer.py）──
     cache_rate = args.transform_to_laten["cache_rate"]
     dl_num_workers = args.transform_to_laten["num_workers"]
-    batch_size = 1  # 醫學影像尺寸不一致，batch_size=1 避免 collation 錯誤
+    batch_size = args.transform_to_laten["batch_size"]
     cleanup_interval = 50
 
     try:
@@ -469,11 +382,16 @@ def diff_model_create_training_data(
                 os.path.join(args.embedding_base_dir, data_type), exist_ok=True
             )
 
+            # ── 統一建立 transforms（一次建立，所有資料共用）──
+            data_transforms = create_data_transforms(data_type=data_type,
+                                                     data_base_dir=args.data_base_dir,
+                                                     embedding_base_dir=args.embedding_base_dir,
+                                                     modality=global_modality)
+
             # ── 優化: 預先過濾已存在的 embedding ──
             file_list, skipped = build_file_list(
                 json_data,
                 data_type,
-                args.data_base_dir,
                 args.embedding_base_dir,
                 logger,
             )
@@ -525,7 +443,7 @@ def diff_model_create_training_data(
             for batch_data in tqdm(
                     data_loader,
                     desc=f"[Rank {local_rank}] {data_type}",
-                    disable=(local_rank != 0),
+                    # disable=(local_rank != 0),
             ):
                 batch_count += 1
 
@@ -553,6 +471,8 @@ def diff_model_create_training_data(
             for fut in pending_futures:
                 fut.result()
             pending_futures.clear()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
             logger.info(
                 f"[{data_type}] Finished processing on rank {local_rank}."
