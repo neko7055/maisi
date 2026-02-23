@@ -256,7 +256,7 @@ def diff_model_create_training_data(
     autoencoder.eval()
 
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
-
+    autoencoder = torch.compile(autoencoder, mode="max-autotune", fullgrap=True, dynamic=False)
     # ── Ensure output dirs exist ──
     Path(args.embedding_base_dir).mkdir(parents=True, exist_ok=True)
 
