@@ -138,6 +138,7 @@ def save_embedding_async(
 
 
 def process_single_item(
+    args: argparse.Namespace,
     item: dict,
     autoencoder: torch.nn.Module,
     device: torch.device,
@@ -325,7 +326,7 @@ def diff_model_create_training_data(
                 disable=(local_rank != 0),
             )):
                 futures = process_single_item(
-                    item, autoencoder, device, inferer, io_executor, logger
+                    args, item, autoencoder, device, inferer, io_executor, logger,
                 )
                 pending_futures.extend(futures)
 
