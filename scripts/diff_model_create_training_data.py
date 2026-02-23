@@ -192,8 +192,12 @@ def process_single_item(
                     .unsqueeze(0)
                     .unsqueeze(0)
                 )
-
-                z_mu, _ = dynamic_infer(inferer, autoencoder.encode, pt_nda)
+                if pt_nda.shape[2] <= args.transform_to_laten['slide_window_size'][0] or \
+                   pt_nda.shape[3] <= args.transform_to_laten['slide_window_size'][1] or \
+                   pt_nda.shape[4] <= args.transform_to_laten['slide_window_size'][2]:
+                    z_mu, _ = autoencoder.encode(pt_nda)
+                else:
+                    z_mu, _ = dynamic_infer(inferer, autoencoder.encode, pt_nda)
                 logger.info(f"{key}, z_mu: {z_mu.size()}, {z_mu.dtype}")
 
             # 立即移到 CPU 釋放 GPU 記憶體
