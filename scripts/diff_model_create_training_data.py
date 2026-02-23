@@ -258,8 +258,7 @@ def diff_model_create_training_data(
                                 mode="max-autotune",
                                 fullgraph=True,
                                 dynamic=False,
-                                backend="inductor",
-                                options={"triton.cudagraphs": True})
+                                backend="inductor",)
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
     # ── Ensure output dirs exist ──
     Path(args.embedding_base_dir).mkdir(parents=True, exist_ok=True)
