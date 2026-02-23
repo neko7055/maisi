@@ -260,7 +260,7 @@ def encode_and_save(
         return None
 
     try:
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+        with torch.amp.autocast("cuda", dtype=torch.float16):
             # image_tensor 來自 DataLoader: [C, X, Y, Z]
             # autoencoder 需要 [B, C, X, Y, Z]
             pt_nda = image_tensor.float().to(device).unsqueeze(0)
