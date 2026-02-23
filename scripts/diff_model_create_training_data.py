@@ -251,6 +251,7 @@ def diff_model_create_training_data(
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     autoencoder.eval()
+    logger.info(f"Slide Window Size: {args.transform_to_laten['slide_window_size']}, SW Batch Size: {args.transform_to_laten['sw_batch_size']}")
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
 
     # ── Ensure output dirs exist ──
