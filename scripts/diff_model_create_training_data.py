@@ -241,7 +241,7 @@ def diff_model_create_training_data(
     args = load_config(env_config_path, model_config_path, model_def_path)
     if "autoencoder_tp_num_splits" in args.transform_to_laten.keys():
         args.autoencoder_def["num_splits"] = args.transform_to_laten["autoencoder_tp_num_splits"]
-
+    args.autoencoder_def["save_mem"] = False
     # ── Initialize distributed ──
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
     logger = setup_logging("creating training data", rk_filter=False)

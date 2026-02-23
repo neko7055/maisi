@@ -4,7 +4,7 @@ from collections import OrderedDict
 from monai.config import print_config
 
 from scripts.diff_model_setting import setup_logging
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
+# os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
 print_config()
 
 logger = setup_logging("create_setting_file")

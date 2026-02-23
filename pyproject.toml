@@ -10,6 +10,7 @@ dependencies = [
   "wheel-stub",
   "simpleitk",
   "nibabel",
+  "ultralytics-thop",
   "accelerate",
   "torchmetrics",
   "transformers[torch]",
