@@ -14,7 +14,10 @@
 
 # Load your shared environment (if needed)
 # module load Anaconda3/2021.11  # uncomment if your site uses module system
-cd /work/r12946008/maisi
+SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+
+# 切換目錄，如果失敗則印出錯誤訊息並終止腳本 (exit 1)
+cd "$SCRIPT_DIR" || { echo "切換目錄失敗: $SCRIPT_DIR"; exit 1; }
 # Ensure the logs directory exists
 
 mkdir -p logs
@@ -47,3 +50,4 @@ duration=$((end_time - start_time))
 minutes=$((duration / 60))
 seconds=$((duration % 60))
 echo "Execution time: ${minutes} minutes ${seconds} seconds"
+#/mnt/home/r12946008-ntu_-ff621a/maisi/logs/
