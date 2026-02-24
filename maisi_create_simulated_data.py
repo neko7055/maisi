@@ -1,4 +1,5 @@
 import os
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
 import logging
 import json
 import numpy as np
@@ -52,7 +53,6 @@ def get_random_affine(
     return affine
 
 if __name__ == "__main__":
-    # os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
     logger = logging.getLogger("create_simulated_data")
 
     number_of_sim_data = 10
