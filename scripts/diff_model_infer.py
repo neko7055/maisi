@@ -102,7 +102,7 @@ def compile_model(model, shape, device):
         backend="inductor",
     )
     # warmup: 觸發編譯
-    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
+    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float16):
             example_inputs = torch.randn(1, 1, *shape, device=device)
             _ = model.decode(example_inputs)
     return model
@@ -482,7 +482,7 @@ def run_inference(
         # 導致 inference_mode 完全不生效。
         # 修正: 使用逗號分隔，兩者都正確進入 context。
         with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.bfloat16
+                device_type=device.type, enabled=True, dtype=torch.float32
         ):
             for t, next_t in zip(all_timesteps, all_next_timesteps):
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
@@ -491,6 +491,9 @@ def run_inference(
             mu_t = mu_t * (1.0 / scale_factor) + shift_factor
 
             # Decode latent → image
+        with torch.inference_mode(), torch.autocast(
+                device_type=device.type, enabled=True, dtype=torch.float16
+        ):
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
 
         # ── Post-process on CPU ──
@@ -567,8 +570,6 @@ def diff_model_infer(
         args.autoencoder_def["num_splits"] = args.diffusion_unet_inference[
             "autoencoder_tp_num_splits"
         ]
-    args.autoencoder_def["save_mem"] = False
-    args.autoencoder_def["norm_float16"] = False
 
     local_rank, world_size, device = initialize_distributed(num_gpus)
     logger = setup_logging("inference")
