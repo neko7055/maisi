@@ -62,8 +62,8 @@ os.makedirs(env_config_out["output_dir"], exist_ok=True)
 model_config_out = OrderedDict()
 
 model_config_out["transform_to_laten"] = OrderedDict()
-model_config_out["transform_to_laten"]["batch_size"] = 1
-model_config_out["transform_to_laten"]["sw_batch_size"] = 1
+model_config_out["transform_to_laten"]["batch_size"] = 8
+model_config_out["transform_to_laten"]["sw_batch_size"] = 15
 model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 64]
 model_config_out["transform_to_laten"]["autoencoder_tp_num_splits"] = 1
 model_config_out["transform_to_laten"]["modality"] = "ct_non_contrast_to_contrast"
@@ -76,7 +76,7 @@ model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 4
 model_config_out["diffusion_unet_train"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_train"]["lr"] = 0.0001
 model_config_out["diffusion_unet_train"]["n_epochs"] = 1000
-model_config_out["diffusion_unet_train"]["validation_num_steps"] = 5
+model_config_out["diffusion_unet_train"]["num_validation_steps"] = 5
 model_config_out["diffusion_unet_train"]["validation_batch_size"] = 8
 
 model_config_out["diffusion_unet_inference"] = OrderedDict()
