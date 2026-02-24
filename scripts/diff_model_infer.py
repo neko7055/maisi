@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import random
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime
 from types import MethodType
 from typing import Optional
@@ -316,7 +316,7 @@ def _save_single_image(
 
 
 def save_images_async(
-        executor: ThreadPoolExecutor,
+        executor: ProcessPoolExecutor,
         datas: np.ndarray,
         out_spacings: np.ndarray,
         output_names: list,
@@ -397,7 +397,7 @@ def run_inference(
         include_body_region: bool,
         include_modality: bool,
         device: torch.device,
-        io_executor: ThreadPoolExecutor,
+        io_executor: ProcessPoolExecutor,
         cleanup_interval: int = 20,
 ) -> None:
     """
@@ -668,7 +668,7 @@ def diff_model_infer(
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
     # ── 非同步 I/O 執行緒池 ──
-    io_executor = ThreadPoolExecutor(max_workers=12)
+    io_executor = ProcessPoolExecutor(max_workers=8)
     cleanup_interval = 50
 
     try:

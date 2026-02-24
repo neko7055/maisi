@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ProcessPoolExecutor, Future
 from functools import partial
 
 import monai
@@ -280,7 +280,7 @@ def process_batch(
         autoencoder: torch.nn.Module,
         device: torch.device,
         inferer: SlidingWindowInferer,
-        io_executor: ThreadPoolExecutor,
+        io_executor: ProcessPoolExecutor,
         logger: logging.Logger,
 ) -> list[Future]:
     all_futures = []
@@ -386,7 +386,7 @@ def diff_model_create_training_data(
     )
 
     # ── 優化: ThreadPoolExecutor 非同步 I/O ──
-    io_executor = ThreadPoolExecutor(max_workers=12)
+    io_executor = ProcessPoolExecutor(max_workers=8)
 
     # ── DataLoader 設定（參考 diff_model_infer.py）──
     cache_rate = args.transform_to_laten["cache_rate"]
