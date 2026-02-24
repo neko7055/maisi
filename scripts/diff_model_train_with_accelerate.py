@@ -374,7 +374,7 @@ def train_one_epoch(
         spacing_tensor = train_data["spacing"].to(device)
 
         # Logic remains same
-        assert isinstance(noise_scheduler, RFlowScheduler)
+        assert isinstance(noise_scheduler, RFlowScheduler), "Currently we only support RFlowScheduler for training, please check your config and model definition."
         timesteps = noise_scheduler.sample_timesteps(src_images)
 
         mu_t, d_mu_t = noise_scheduler.add_noise(src_images, tar_images, timesteps)
