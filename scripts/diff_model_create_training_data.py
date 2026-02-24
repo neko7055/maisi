@@ -270,12 +270,12 @@ def process_batch(
         with torch.amp.autocast("cuda", dtype=torch.float16):
             z_mu, z_log_var = dynamic_infer(inferer, autoencoder.encode, pt_nda)
             logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
-        out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1) # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
+        out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1).copy() # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
         # 主動釋放 GPU tensor
         del pt_nda, z_mu, z_log_var
         futures = [
             io_executor.submit(partial(img_save, logger=logger), a, b, c)
-            for a, b, c in zip(out_ndas, batch_data[f"{key}_out_path"], batch_data[f"{key}_affine"].numpy())
+            for a, b, c in zip(out_ndas, batch_data[f"{key}_out_path"], batch_data[f"{key}_affine"].numpy().copy())
         ]
         all_futures.extend(futures)
     return all_futures
