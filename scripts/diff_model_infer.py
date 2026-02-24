@@ -27,13 +27,14 @@ import torch.distributed as dist
 import monai
 from monai.data import DataLoader, partition_dataset
 from monai.inferers.inferer import SlidingWindowInferer
+from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
 from monai.utils import set_determinism
 from tqdm import tqdm
 
 from .diff_model_setting import initialize_distributed, load_config, setup_logging
 from .utils import define_instance, dynamic_infer
-from .solver import euler_step
+from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 
 # torch.set_float32_matmul_precision('high')
 # torch.backends.cudnn.allow_tf32 = True
@@ -390,7 +391,7 @@ def run_inference(
         data_loader: DataLoader,
         shift_factor: torch.Tensor,
         scale_factor: torch.Tensor,
-        noise_scheduler,
+        noise_scheduler: RFlowScheduler,
         inferer: SlidingWindowInferer,
         logger: logging.Logger,
         include_body_region: bool,
@@ -589,7 +590,7 @@ def diff_model_infer(
 
     # ── Noise scheduler ──
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(euler_step, noise_scheduler)
+    noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
         input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
