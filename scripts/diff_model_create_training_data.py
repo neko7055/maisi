@@ -33,6 +33,11 @@ from .diff_model_setting import initialize_distributed, load_config, setup_loggi
 from .transforms import define_fixed_intensity_transform, SUPPORT_MODALITIES
 from .utils import define_instance, dynamic_infer
 
+# torch.set_float32_matmul_precision('high')
+# torch.backends.cudnn.allow_tf32 = True
+# torch.backends.cudnn.benchmark = True
+# torch.backends.cudnn.deterministic = False
+
 def compile_model(model, shape, device):
     """
     編譯 autoencoder 的 encode 方法，使用 torch.compile 而非私有 API。

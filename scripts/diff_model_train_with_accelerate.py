@@ -28,6 +28,10 @@ from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 from .ssim import SSIM3D
 from .utils import define_instance
 
+# torch.set_float32_matmul_precision('high')
+# torch.backends.cudnn.allow_tf32 = True
+# torch.backends.cudnn.benchmark = True
+# torch.backends.cudnn.deterministic = False
 
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
@@ -151,8 +155,13 @@ def prepare_data(
     train_ds = monai.data.CacheDataset(
         data=train_files, transform=train_transforms, cache_rate=cache_rate, num_workers=num_workers
     )
-
-    return DataLoader(train_ds, num_workers=num_workers, batch_size=batch_size, shuffle=True)
+    use_persistent = num_workers > 0
+    return DataLoader(train_ds,
+                      num_workers=num_workers,
+                      batch_size=batch_size,
+                      shuffle=True,
+                      pin_memory=True,
+                      persistent_workers=use_persistent,)
 
 
 def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: logging.Logger) -> torch.nn.Module:
@@ -497,7 +506,6 @@ def diff_model_train(
                                     include_modality)
     val_files = prepare_file_list(filenames_val, args.embedding_base_dir, "validation", include_body_region,
                                   include_modality)
-    # test_files = prepare_file_list(filenames_test,args.embedding_base_dir, "test", include_body_region, include_modality)
 
     # Partition dataset BEFORE creating CacheDataset to save RAM
     # Accelerate makes this easy by giving us num_processes and process_index
@@ -515,13 +523,6 @@ def diff_model_train(
         even_divisible=False
     )[accelerator.process_index]
 
-    # test_files = partition_dataset(
-    #     data=test_files,
-    #     shuffle=False,
-    #     num_partitions=accelerator.num_processes,
-    #     even_divisible=False
-    # )[accelerator.process_index]
-
     # Calculate scale factor locally then sync
     shift_factor, scale_factor = calculate_scale_factor(train_files, accelerator, logger)
     noise_scheduler.set_timesteps(
@@ -532,7 +533,8 @@ def diff_model_train(
     # Create DataLoader with local subset
     train_loader = prepare_data(
         train_files,
-        args.diffusion_unet_train["cache_rate"],
+        cache_rate=args.diffusion_unet_train["cache_rate"],
+        num_workers=args.diffusion_unet_train["num_workers"],
         batch_size=args.diffusion_unet_train["batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
@@ -541,21 +543,13 @@ def diff_model_train(
 
     val_loader = prepare_data(
         val_files,
-        args.diffusion_unet_train["cache_rate"],
+        cache_rate=args.diffusion_unet_train["cache_rate"],
+        num_workers=args.diffusion_unet_train["num_workers"],
         batch_size=args.diffusion_unet_train["validation_batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
         modality_mapping=args.modality_mapping
     )
-
-    # test_loader = prepare_data(
-    #     test_files,
-    #     args.diffusion_unet_train["cache_rate"],
-    #     batch_size=args.diffusion_unet_train["batch_size"],
-    #     include_body_region=include_body_region,
-    #     include_modality=include_modality,
-    #     modality_mapping=args.modality_mapping
-    # )
 
     optimizer = create_optimizer(unet, args.diffusion_unet_train["lr"])
 
@@ -572,7 +566,6 @@ def diff_model_train(
         unet, optimizer, lr_scheduler
     )
 
-    torch.set_float32_matmul_precision("highest")
 
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
         start_time = time.perf_counter()

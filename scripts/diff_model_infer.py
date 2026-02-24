@@ -35,6 +35,11 @@ from .diff_model_setting import initialize_distributed, load_config, setup_loggi
 from .utils import define_instance, dynamic_infer
 from .solver import euler_step
 
+# torch.set_float32_matmul_precision('high')
+# torch.backends.cudnn.allow_tf32 = True
+# torch.backends.cudnn.benchmark = True
+# torch.backends.cudnn.deterministic = False
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 常數
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -659,7 +664,6 @@ def diff_model_infer(
         modality_mapping=args.modality_mapping,
     )
 
-    torch.set_float32_matmul_precision("highest")
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
     # ── 非同步 I/O 執行緒池 ──
