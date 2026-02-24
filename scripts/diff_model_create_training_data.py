@@ -98,8 +98,7 @@ def create_data_transforms(data_type,
         輸出已為 RAS 方向（nibabel 預設以 header 中的方向載入，
         若需強制 RAS，使用 nibabel.as_closest_canonical）。
         """
-        data = np.asarray(img.dataobj, dtype=np.float32)
-
+        data = img.get_fdata(caching='unchanged', dtype=np.float32)
         if data.ndim == 3:
             # (X, Y, Z) → (1, X, Y, Z)
             data = data[np.newaxis, ...]
@@ -107,32 +106,37 @@ def create_data_transforms(data_type,
             # (X, Y, Z, C) → (C, X, Y, Z)
             data = data.transpose(3, 0, 1, 2)
 
-        return torch.as_tensor(data, dtype=torch.float32)
+        return torch.from_numpy(data.copy())
 
     base_transforms = [
         monai.transforms.Lambdad(
             keys=keys,
             func=_build_out_path,
+            track_meta=False,
             overwrite=["src_out_path", "tar_out_path"],
         ),
         monai.transforms.Lambdad(
             keys=keys,
             func=_build_full_path,
+            track_meta=False,
             overwrite=True,
         ),
         monai.transforms.Lambdad(
             keys=keys,
             func=_load_nifti,
+            track_meta=False,
             overwrite=True,
         ),
         monai.transforms.Lambdad(
             keys=keys,
             func=_read_affine,
+            track_meta=False,
             overwrite=["src_affine", "tar_affine"],
         ),
         monai.transforms.Lambdad(
             keys=keys,
             func=_nifti_as_tensor,
+            track_meta=False,
             overwrite=True,
         ),
     ]
@@ -271,7 +275,7 @@ def process_batch(
         del pt_nda, z_mu, z_log_var
         futures = [
             io_executor.submit(partial(img_save, logger=logger), a, b, c)
-            for a, b, c in zip(out_ndas, batch_data[f"{key}_out_path"], batch_data[f"{key}_affine"])
+            for a, b, c in zip(out_ndas, batch_data[f"{key}_out_path"], batch_data[f"{key}_affine"].numpy())
         ]
         all_futures.extend(futures)
     return all_futures
@@ -332,13 +336,13 @@ def diff_model_create_training_data(
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     autoencoder.eval()
-    autoencoder = torch.compile(
-        autoencoder,
-        mode="max-autotune",
-        fullgraph=False,
-        dynamic=False,
-        backend="inductor",
-    )
+    # autoencoder = torch.compile(
+    #     autoencoder,
+    #     mode="max-autotune",
+    #     fullgraph=False,
+    #     dynamic=False,
+    #     backend="inductor",
+    # )
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
 
     # ── Ensure output dirs exist ──
