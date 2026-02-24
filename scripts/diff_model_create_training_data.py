@@ -34,7 +34,22 @@ from .diff_model_setting import initialize_distributed, load_config, setup_loggi
 from .transforms import define_fixed_intensity_transform, SUPPORT_MODALITIES
 from .utils import define_instance, dynamic_infer
 
-
+def compile_model(model, shape, device):
+    """
+    編譯 autoencoder 的 encode 方法，使用 torch.compile 而非私有 API。
+    """
+    model = torch.compile(
+        model,
+        mode="max-autotune",
+        fullgraph=False,
+        dynamic=False,
+        backend="inductor",
+    )
+    # warmup: 觸發編譯
+    with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+            example_inputs = torch.randn(1, 1, *shape, device=device)
+            _ = model.encode(example_inputs)
+    return model
 # ═══════════════════════════════════════════════════════════════════════════════
 # Transform 建立
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -267,7 +282,7 @@ def process_batch(
     all_futures = []
     for key in ("src", "tar"):
         pt_nda = batch_data[f"{key}_image"].to(device) # size: [B, C, X, Y, Z]
-        with torch.amp.autocast("cuda", dtype=torch.float16):
+        with torch.amp.autocast(device.type, dtype=torch.bfloat16):
             z_mu, z_log_var = dynamic_infer(inferer, autoencoder.encode, pt_nda)
             logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
         out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1).copy() # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
@@ -314,6 +329,7 @@ def diff_model_create_training_data(
             "autoencoder_tp_num_splits"
         ]
     args.autoencoder_def["save_mem"] = False
+    args.autoencoder_def["norm_float16"] = False
 
     # ── Initialize distributed ──
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
@@ -336,13 +352,7 @@ def diff_model_create_training_data(
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     autoencoder.eval()
-    # autoencoder = torch.compile(
-    #     autoencoder,
-    #     mode="max-autotune",
-    #     fullgraph=False,
-    #     dynamic=False,
-    #     backend="inductor",
-    # )
+    autoencoder = compile_model(autoencoder, args.transform_to_laten['slide_window_size'], device)
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
 
     # ── Ensure output dirs exist ──
