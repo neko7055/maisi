@@ -18,7 +18,6 @@ import os
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, Future
 from functools import partial
-from typing import Optional
 
 import monai
 import nibabel as nib
