@@ -84,12 +84,28 @@ def _load_json_field(file_path: str, key: str, convert_to_float: bool = True):
 # 模型載入
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def compile_model(model, shape, device):
+    """
+    編譯 autoencoder 的 encode 方法，使用 torch.compile 而非私有 API。
+    """
+    model = torch.compile(
+        model,
+        mode="max-autotune",
+        fullgraph=False,
+        dynamic=False,
+        backend="inductor",
+    )
+    # warmup: 觸發編譯
+    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
+            example_inputs = torch.randn(1, 1, *shape, device=device)
+            _ = model.decode(example_inputs)
+    return model
+
 
 def load_models(
         args: argparse.Namespace,
         device: torch.device,
         logger: logging.Logger,
-        compile_models: bool = False,
 ) -> tuple:
     """
     載入 autoencoder 與 UNet 模型。
@@ -128,22 +144,6 @@ def load_models(
     scale_factor = checkpoint["scale_factor"]
     logger.info(f"shift_factor -> {shift_factor}.")
     logger.info(f"scale_factor -> {scale_factor}.")
-
-    # ── torch.compile（可選）──
-    # 使用 reduce-overhead 而非 max-autotune，因推理輸入形狀可能變動
-    if compile_models and hasattr(torch, "compile"):
-        try:
-            autoencoder = torch.compile(
-                autoencoder,
-                mode="max-autotune",
-                fullgraph=True,
-                dynamic=False,
-                backend="inductor",
-            )
-            # unet = torch.compile(unet, mode="reduce-overhead", dynamic=True)
-            logger.info("Models compiled with torch.compile.")
-        except Exception as e:
-            logger.warning(f"torch.compile failed, fallback to eager: {e}")
 
     return autoencoder, unet, shift_factor, scale_factor
 
@@ -386,7 +386,7 @@ def run_inference(
         shift_factor: torch.Tensor,
         scale_factor: torch.Tensor,
         noise_scheduler,
-        slide_window_size: list[int],
+        inferer: SlidingWindowInferer,
         logger: logging.Logger,
         include_body_region: bool,
         include_modality: bool,
@@ -413,16 +413,6 @@ def run_inference(
 
     # 修正: 原始碼在每個 batch 的 autocast 區塊內重建 SlidingWindowInferer
     # 移至迴圈外並啟用權重圖快取，避免重複計算高斯權重
-    inferer = SlidingWindowInferer(
-        roi_size=slide_window_size,
-        sw_batch_size=1,
-        progress=False,
-        mode="gaussian",
-        overlap=0.5,
-        sw_device=device,
-        device=device,
-        cache_roi_weight_map=True,
-    )
 
     pending_futures: list[Future] = []
     batch_count = 0
@@ -541,6 +531,8 @@ def run_inference(
     for fut in pending_futures:
         fut.result()
     pending_futures.clear()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -569,6 +561,8 @@ def diff_model_infer(
         args.autoencoder_def["num_splits"] = args.diffusion_unet_inference[
             "autoencoder_tp_num_splits"
         ]
+    args.autoencoder_def["save_mem"] = False
+    args.autoencoder_def["norm_float16"] = False
 
     local_rank, world_size, device = initialize_distributed(num_gpus)
     logger = setup_logging("inference")
@@ -583,10 +577,10 @@ def diff_model_infer(
     )
 
     # ── 載入模型 ──
-    compile_models = args.diffusion_unet_inference.get("compile_models", False)
     autoencoder, unet, shift_factor, scale_factor = load_models(
-        args, device, logger, compile_models=compile_models
+        args, device, logger
     )
+    autoencoder = compile_model(autoencoder, args.diffusion_unet_inference["slide_window_size"], device)
 
     # ── Noise scheduler ──
     noise_scheduler = define_instance(args, "noise_scheduler")
@@ -648,7 +642,8 @@ def diff_model_infer(
     # ── DataLoader ──
     train_loader = prepare_data(
         train_files,
-        args.diffusion_unet_inference["cache_rate"],
+        cache_rate=args.diffusion_unet_inference["cache_rate"],
+        num_workers=args.diffusion_unet_inference["num_workers"],
         batch_size=args.diffusion_unet_inference["batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
@@ -656,7 +651,8 @@ def diff_model_infer(
     )
     val_loader = prepare_data(
         val_files,
-        args.diffusion_unet_inference["cache_rate"],
+        cache_rate=args.diffusion_unet_inference["cache_rate"],
+        num_workers=args.diffusion_unet_inference["num_workers"],
         batch_size=args.diffusion_unet_inference["batch_size"],
         include_body_region=include_body_region,
         include_modality=include_modality,
@@ -668,12 +664,25 @@ def diff_model_infer(
 
     # ── 非同步 I/O 執行緒池 ──
     io_executor = ThreadPoolExecutor(max_workers=12)
+    cleanup_interval = 50
 
     try:
         # 修正: 原始碼 data = run_inference(...) 但函式無回傳值
         for mode, loader in [("training", train_loader), ("validation", val_loader)]:
             save_dir = os.path.join(args.output_dir, timestamp, mode)
             os.makedirs(save_dir, exist_ok=True)
+
+            inferer = SlidingWindowInferer(
+                roi_size=args.diffusion_unet_inference["slide_window_size"],
+                sw_batch_size=args.diffusion_unet_inference["sw_batch_size"],
+                progress=False,
+                mode="gaussian",
+                overlap=0.5,
+                sw_device=device,
+                device=device,
+                cache_roi_weight_map=True,
+            )
+
             run_inference(
                 data_root_dir=save_dir,
                 unet=unet,
@@ -682,14 +691,13 @@ def diff_model_infer(
                 shift_factor=shift_factor,
                 scale_factor=scale_factor,
                 noise_scheduler=noise_scheduler,
-                slide_window_size=args.diffusion_unet_inference[
-                    "slide_window_size"
-                ],
+                inferer=inferer,
                 logger=logger,
                 include_body_region=include_body_region,
                 include_modality=include_modality,
                 device=device,
                 io_executor=io_executor,
+                cleanup_interval=cleanup_interval
             )
     finally:
         # 確保所有 I/O 完成後才關閉執行緒池

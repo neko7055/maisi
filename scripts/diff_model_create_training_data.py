@@ -45,7 +45,7 @@ def compile_model(model, shape, device):
         backend="inductor",
     )
     # warmup: 觸發編譯
-    with torch.inference_mode(), torch.autocast(device_type=device.type, dtype=torch.bfloat16):
+    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
             example_inputs = torch.randn(1, 1, *shape, device=device)
             _ = model.encode(example_inputs)
     return model
@@ -281,7 +281,7 @@ def process_batch(
     all_futures = []
     for key in ("src", "tar"):
         pt_nda = batch_data[f"{key}_image"].to(device) # size: [B, C, X, Y, Z]
-        with torch.amp.autocast(device.type, dtype=torch.bfloat16):
+        with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
             z_mu, z_log_var = dynamic_infer(inferer, autoencoder.encode, pt_nda)
             logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
         out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1).copy() # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
