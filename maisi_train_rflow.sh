@@ -14,12 +14,9 @@
 
 #SBATCH --export=ALL
 
-# Load your shared environment (if needed)
-# module load Anaconda3/2021.11  # uncomment if your site uses module system
-SCRIPT_DIR=$(dirname "$(readlink -f "$0")")
+PROJECT_DIR="/work/r12946008/maisi"
 
-# 切換目錄，如果失敗則印出錯誤訊息並終止腳本 (exit 1)
-cd "$SCRIPT_DIR" || { echo "切換目錄失敗: $SCRIPT_DIR"; exit 1; }
+cd "$PROJECT_DIR" || { echo "切換目錄失敗: $PROJECT_DIR"; exit 1; }
 # Ensure the logs directory exists
 
 mkdir -p logs
