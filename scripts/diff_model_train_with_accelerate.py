@@ -582,7 +582,12 @@ def diff_model_train(
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
+    start_time = time.perf_counter()
     unet = compile_unet_model(unet)
+    end_time = time.perf_counter()
+    elapsed_time = end_time - start_time
+    if accelerator.is_main_process:
+        logger.info(f"Model compilation completed, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
 
 
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
