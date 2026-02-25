@@ -51,7 +51,7 @@ class Loss(torch.nn.Module):
         self.ssim_16 = SSIM3D(window_size=16)
         self.ssim_32 = SSIM3D(window_size=32)
         self.ssim_64 = SSIM3D(window_size=64)
-        self.xsigmoid_loss = XSigmoidLoss()
+        self.xsigmoidloss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
         ssim = self.ssim_64(outputs, targets) * 0.4 + \
@@ -244,8 +244,9 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
-    optimizer = Lion(model.parameters(), lr=lr)
-    optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    #optimizer = Lion(model.parameters(), lr=lr)
+    #optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     return optimizer
 
 
