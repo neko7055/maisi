@@ -42,3 +42,76 @@ explicit = true
 torch = { index = "pytorch-cu130" }
 torchvision = { index = "pytorch-cu130" }
 ```
+
+# Usage
+
+## preprocess_data.py
+resize the data and split the data according to the json_split.json, and save the processed data in the data/data dir, and save the datalist.json in the data dir.
+## origin data dir structure
+```data/
+├── floder1
+│   ├── image1.nii.gz
+│   ├── image2.nii.gz
+│   └── ...
+├── floder2
+│   ├── image1.nii.gz
+│   ├── image2.nii.gz
+│   └── ...
+├── ...
+├──json_split.json
+```
+### json_split.json
+```json
+{
+  "training": ["floder1/image1.nii.gz", "floder2/image1.nii.gz", ...],
+  "validation": ["floder1/image2.nii.gz", "floder2/image2.nii.gz", ...],
+  "test": ["floder1/image3.nii.gz", "floder2/image3.nii.gz", ...]
+}
+```
+
+## processed data dir structure
+```data/
+├── data
+│   ├── train
+│   │   ├── image1.nii.gz
+│   │   ├── image2.nii.gz
+│   │   └── ...
+│   ├── val
+│   │   ├── image1.nii.gz
+│   │   ├── image2.nii.gz
+│   │   └── ...
+│   └── test
+│       ├── image1.nii.gz
+│       ├── image2.nii.gz
+│       └── ...
+├── datalist.json
+```
+### datalist.json
+```json
+{
+  "training": [
+        {
+          "src_image": "CVAI-0001-src.nii.gz",
+          "tar_image": "CVAI-0001-tar.nii.gz",
+          "modality": "ct_non_contrast_to_contrast"
+        },
+        ...
+    ],
+    "validation": [
+        {
+        "src_image": "CVAI-0002-src.nii.gz",
+        "tar_image": "CVAI-0002-tar.nii.gz",
+        "modality": "ct_non_contrast_to_contrast"
+        },
+        ...
+    ],
+    "test": [
+        {
+        "src_image": "CVAI-0002-src.nii.gz",
+        "tar_image": "CVAI-0002-tar.nii.gz",
+        "modality": "ct_non_contrast_to_contrast"
+        },
+        ...
+    ]
+}
+```
