@@ -19,7 +19,7 @@ def create_window_3D(window_size, channel):
     window = _3D_window.expand(channel, 1, window_size, window_size, window_size).contiguous()
     return window
 
-@torch.compile
+@torch.compile(mode="max-autotune", backend="inductor", dynamic=True, fullgraph=False)
 def _ssim_3D(img1, img2, window, window_size, channel, size_average=True):
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
