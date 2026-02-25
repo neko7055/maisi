@@ -206,10 +206,12 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     def _calculate(tensor_list):
         if len(tensor_list) > 0:
             all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
-            median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
-            mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
-            shift_factor = median_data
-            scale_factor = 1 / mad
+            mean = torch.mean(all_data, dim=0, keepdim=True)
+            std = torch.std(all_data, dim=0, keepdim=True)
+            #median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
+            #mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
+            shift_factor = mean#median_data
+            scale_factor = 1 / std#mad
         else:
             # Fallback if a process has no data (unlikely with proper partition)
             scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
