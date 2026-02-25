@@ -285,7 +285,7 @@ def process_batch(
 ) -> list[Future]:
     all_futures = []
     for key in ("src", "tar"):
-        pt_nda = batch_data[f"{key}_image"].to(device) # size: [B, C, X, Y, Z]
+        pt_nda = batch_data[f"{key}_image"].to(device, non_blocking=True) # size: [B, C, X, Y, Z]
         with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.float32):
             z_mu, z_log_var = dynamic_infer(inferer, autoencoder.encode, pt_nda)
             logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")

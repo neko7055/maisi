@@ -330,18 +330,28 @@ def evaluate(
         # This is because we pre-partitioned for CacheDataset memory efficiency.
         device = accelerator.device
 
-        src_images = eval_data["src_image"].to(device)
-        tar_images = eval_data["tar_image"].to(device)
+        src_images = eval_data["src_image"].to(device, non_blocking=True)
+        tar_images = eval_data["tar_image"].to(device, non_blocking=True)
 
         src_images = (src_images - src_shift_factor) * src_scale_factor
 
-        if include_body_region:
-            top_region_index_tensor = eval_data["top_region_index"].to(device)
-            bottom_region_index_tensor = eval_data["bottom_region_index"].to(device)
-        if include_modality:
-            modality_tensor = eval_data["modality"].to(device)
+        top_region_index_tensor = None
+        bottom_region_index_tensor = None
+        modality_tensor = None
 
-        spacing_tensor = eval_data["spacing"].to(device)
+        if include_body_region:
+            top_region_index_tensor = eval_data["top_region_index"].to(
+                device, non_blocking=True
+            )
+            bottom_region_index_tensor = eval_data["bottom_region_index"].to(
+                device, non_blocking=True
+            )
+        if include_modality:
+            modality_tensor = eval_data["modality"].to(
+                device, non_blocking=True
+            )
+
+        spacing_tensor = eval_data["spacing"].to(device, non_blocking=True)
 
         all_timesteps = noise_scheduler.timesteps
         all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
@@ -415,13 +425,13 @@ def train_one_epoch(
         # This is because we pre-partitioned for CacheDataset memory efficiency.
         device = accelerator.device
 
-        src_images = train_data["src_image"].to(device)
-        tar_images = train_data["tar_image"].to(device)
+        src_images = train_data["src_image"].to(device, non_blocking=True)
+        tar_images = train_data["tar_image"].to(device, non_blocking=True)
 
         src_images = (src_images - src_shift_factor) * src_scale_factor
         tar_images = (tar_images - tar_shift_factor) * tar_scale_factor
 
-        spacing_tensor = train_data["spacing"].to(device)
+        spacing_tensor = train_data["spacing"].to(device, non_blocking=True)
 
         # Logic remains same
         assert isinstance(noise_scheduler, RFlowScheduler), "Currently we only support RFlowScheduler for training, please check your config and model definition."
@@ -436,15 +446,15 @@ def train_one_epoch(
         }
 
         if include_body_region:
-            top_region_index_tensor = train_data["top_region_index"].to(device)
-            bottom_region_index_tensor = train_data["bottom_region_index"].to(device)
+            top_region_index_tensor = train_data["top_region_index"].to(device, non_blocking=True)
+            bottom_region_index_tensor = train_data["bottom_region_index"].to(device, non_blocking=True)
             unet_inputs.update({
                 "top_region_index_tensor": top_region_index_tensor,
                 "bottom_region_index_tensor": bottom_region_index_tensor,
             })
 
         if include_modality:
-            modality_tensor = train_data["modality"].to(device)
+            modality_tensor = train_data["modality"].to(device, non_blocking=True)
             modality_tensor = augment_modality_label(modality_tensor).to(device)
             unet_inputs.update({"class_labels": modality_tensor})
 
