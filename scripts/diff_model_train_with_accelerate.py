@@ -13,6 +13,7 @@ from datetime import datetime
 from functools import partial
 from pathlib import Path
 from types import MethodType
+from typing import Optional
 
 import monai
 import torch
@@ -201,7 +202,19 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
 
 
 def calculate_scale_factor(train_files, accelerator: Accelerator, logger: logging.Logger) -> tuple[
-    torch.Tensor, torch.Tensor]:
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    def _calculate(tensor_list):
+        if len(tensor_list) > 0:
+            all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
+            median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
+            mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
+            shift_factor = median_data
+            scale_factor = 1 / mad
+        else:
+            # Fallback if a process has no data (unlikely with proper partition)
+            scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
+            shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
+        return shift_factor, scale_factor
     # (Calculates scale factor locally then syncs across processes)
     data_transforms_list = [
         monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
@@ -209,43 +222,46 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
         monai.transforms.EnsureTyped(keys=["src_image", "tar_image"], dtype=torch.float32)
     ]
     data_transforms = Compose(data_transforms_list)
-    tensor_list = []
+    src_tensor_list = []
+    tar_tensor_list = []
 
     # Only process local files
     for d in train_files:
         d_transformed = data_transforms(d)
-        tensor_list.append(d_transformed["src_image"])
-        tensor_list.append(d_transformed["tar_image"])
+        src_tensor_list.append(d_transformed["src_image"])
+        tar_tensor_list.append(d_transformed["tar_image"])
 
-    if len(tensor_list) > 0:
-        all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
-        median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
-        mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
-        shift_factor = median_data
-        scale_factor = 1 / mad
-    else:
-        # Fallback if a process has no data (unlikely with proper partition)
-        scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
-        shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
 
-    # Distributed Sync: Average the scale factor across processes
-    scale_factor = accelerator.reduce(scale_factor, reduction="mean").float()
-    shift_factor = accelerator.reduce(shift_factor, reduction="mean").float()
+    src_shift_factor, src_scale_factor = _calculate(src_tensor_list)
+    tar_shift_factor, tar_scale_factor = _calculate(tar_tensor_list)
+
+    src_shift_factor = accelerator.reduce(src_shift_factor, reduction="mean").float()
+    src_scale_factor = accelerator.reduce(src_scale_factor, reduction="mean").float()
+
+    tar_shift_factor = accelerator.reduce(tar_shift_factor, reduction="mean").float()
+    tar_scale_factor = accelerator.reduce(tar_scale_factor, reduction="mean").float()
 
     # replace inf/nan with finite numbers to avoid issues in training
-    scale_factor = torch.where(torch.isfinite(scale_factor), scale_factor, torch.tensor(1.0, device=scale_factor.device, dtype=torch.float32))
-    shift_factor = torch.where(torch.isfinite(shift_factor), shift_factor, torch.tensor(0.0, device=scale_factor.device, dtype=torch.float32))
+    src_scale_factor = torch.where(torch.isfinite(src_scale_factor), src_scale_factor, torch.tensor(1.0, device=src_scale_factor.device, dtype=torch.float32))
+    src_shift_factor = torch.where(torch.isfinite(src_shift_factor), src_shift_factor,torch.tensor(0.0, device=src_shift_factor.device, dtype=torch.float32))
+    tar_scale_factor = torch.where(torch.isfinite(tar_scale_factor), tar_scale_factor, torch.tensor(1.0, device=tar_scale_factor.device, dtype=torch.float32))
+    tar_shift_factor = torch.where(torch.isfinite(tar_shift_factor), tar_shift_factor, torch.tensor(0.0, device=tar_shift_factor.device, dtype=torch.float32))
 
-    logger.info(f"Scale factor is valid -> {torch.isfinite(scale_factor).all().item()}.")
-    logger.info(f"scale_factor -> {scale_factor}.")
-    logger.info(f"Shift factor is valid -> {torch.isfinite(shift_factor).all().item()}.")
-    logger.info(f"shift_factor -> {shift_factor}.")
-    return shift_factor, scale_factor
+    logger.info(f"Src Scale factor is valid -> {torch.isfinite(src_scale_factor).all().item()}.")
+    logger.info(f"Src scale_factor -> {src_scale_factor}.")
+    logger.info(f"Src Shift factor is valid -> {torch.isfinite(src_shift_factor).all().item()}.")
+    logger.info(f"Src shift_factor -> {src_shift_factor}.")
+
+    logger.info(f"Src Scale factor is valid -> {torch.isfinite(tar_scale_factor).all().item()}.")
+    logger.info(f"Src scale_factor -> {tar_scale_factor}.")
+    logger.info(f"Src Shift factor is valid -> {torch.isfinite(tar_shift_factor).all().item()}.")
+    logger.info(f"Src shift_factor -> {tar_shift_factor}.")
+    return src_shift_factor, src_scale_factor, tar_shift_factor, tar_scale_factor
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
     optimizer = Lion(model.parameters(), lr=lr)
-    #optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
     #ptimizer = torch.optim.Adam(model.parameters(), lr=lr)
     return optimizer
 
@@ -253,12 +269,43 @@ def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int) -> torch.optim.lr_scheduler.PolynomialLR:
     return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
 
+def _call_unet(
+        unet: torch.nn.Module,
+        x: torch.Tensor,
+        t: float,
+        spacing_tensor: torch.Tensor,
+        include_body_region: bool,
+        include_modality: bool,
+        top_region_index_tensor: Optional[torch.Tensor],
+        bottom_region_index_tensor: Optional[torch.Tensor],
+        modality_tensor: Optional[torch.Tensor],
+) -> torch.Tensor:
+    """
+    純函式形式呼叫 UNet。
+
+    問題: 原始碼在每個 timestep 的迴圈體內定義 model_warpper（拼字錯誤），
+          導致每步重複建立閉包，且閉包捕捉外部可變引用有潛在風險。
+    解法: 抽為獨立函式，所有依賴透過參數顯式傳入。
+    """
+    unet_inputs = {
+        "x": x,
+        "timesteps": torch.Tensor((t,)).repeat(x.shape[0]).to(x.device),
+        "spacing_tensor": spacing_tensor,
+    }
+    if include_body_region:
+        unet_inputs["top_region_index_tensor"] = top_region_index_tensor
+        unet_inputs["bottom_region_index_tensor"] = bottom_region_index_tensor
+    if include_modality:
+        unet_inputs["class_labels"] = modality_tensor
+    return unet(**unet_inputs)
 
 def evaluate(
         unet: torch.nn.Module,
         data_loader: DataLoader,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
+        src_shift_factor: torch.Tensor,
+        src_scale_factor: torch.Tensor,
+        tar_shift_factor: torch.Tensor,
+        tar_scale_factor: torch.Tensor,
         noise_scheduler: torch.nn.Module,
         accelerator: Accelerator,
         logger: logging.Logger,
@@ -286,7 +333,7 @@ def evaluate(
         src_images = eval_data["src_image"].to(device)
         tar_images = eval_data["tar_image"].to(device)
 
-        src_images = (src_images - shift_factor) * scale_factor
+        src_images = (src_images - src_shift_factor) * src_scale_factor
 
         if include_body_region:
             top_region_index_tensor = eval_data["top_region_index"].to(device)
@@ -302,40 +349,24 @@ def evaluate(
         mu_t = src_images
         with torch.inference_mode():
             for t, next_t in zip(all_timesteps, all_next_timesteps):
-                def model_warpper(t, x):
-                    unet_inputs = {
-                        "x": x,
-                        "timesteps": torch.Tensor((t,)).repeat(x.shape[0]).to(x.device),
-                        "spacing_tensor": spacing_tensor,
-                    }
-                    if include_body_region:
-                        unet_inputs.update({
-                            "top_region_index_tensor": top_region_index_tensor,
-                            "bottom_region_index_tensor": bottom_region_index_tensor,
-                        })
-                    if include_modality:
-                        unet_inputs.update({"class_labels": modality_tensor})
-                    model_output = unet(**unet_inputs)
-                    return model_output
-
-                unet_inputs = {
-                    "x": mu_t,
-                    "timesteps": torch.Tensor((t,)).repeat(mu_t.shape[0]).to(device),
-                    "spacing_tensor": spacing_tensor,
-                }
-                if include_body_region:
-                    unet_inputs.update({
-                        "top_region_index_tensor": top_region_index_tensor,
-                        "bottom_region_index_tensor": bottom_region_index_tensor,
-                    })
-                if include_modality:
-                    unet_inputs.update({"class_labels": modality_tensor})
-                mu_t, _ = noise_scheduler.step(model_warpper, t, mu_t, next_t)
+                def model_wrapper(t, x):
+                    return _call_unet(
+                        unet,
+                        x,
+                        t,
+                        spacing_tensor,
+                        include_body_region,
+                        include_modality,
+                        top_region_index_tensor,
+                        bottom_region_index_tensor,
+                        modality_tensor,
+                    )
+                mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
 
                 # Logging only on main process (simplified checks)
                 # if accelerator.is_main_process:
                 #    logger.info(...)
-            mu_t = mu_t * (1 / scale_factor) + shift_factor  # Un-normalize for loss calculation
+            mu_t = mu_t * (1 / tar_scale_factor) + tar_shift_factor  # Un-normalize for loss calculation
             loss = torch.nn.functional.mse_loss(mu_t, tar_images, reduction='mean')
 
             loss_torch[0] += loss.item()
@@ -353,8 +384,10 @@ def train_one_epoch(
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.PolynomialLR,
         loss_pt: torch.nn.Module,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
+        src_shift_factor: torch.Tensor,
+        src_scale_factor: torch.Tensor,
+        tar_shift_factor: torch.Tensor,
+        tar_scale_factor: torch.Tensor,
         noise_scheduler: torch.nn.Module,
         accelerator: Accelerator,
         logger: logging.Logger,
@@ -385,8 +418,8 @@ def train_one_epoch(
         src_images = train_data["src_image"].to(device)
         tar_images = train_data["tar_image"].to(device)
 
-        src_images = (src_images - shift_factor) * scale_factor
-        tar_images = (tar_images - shift_factor) * scale_factor
+        src_images = (src_images - src_shift_factor) * src_scale_factor
+        tar_images = (tar_images - tar_shift_factor) * tar_scale_factor
 
         spacing_tensor = train_data["spacing"].to(device)
 
@@ -449,8 +482,10 @@ def save_checkpoint(
         unet: torch.nn.Module,
         loss_torch_epoch: float,
         num_train_timesteps: int,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
+        src_shift_factor: torch.Tensor,
+        src_scale_factor: torch.Tensor,
+        tar_shift_factor: torch.Tensor,
+        tar_scale_factor: torch.Tensor,
         ckpt_folder: str,
         args: argparse.Namespace,
         accelerator: Accelerator
@@ -468,8 +503,10 @@ def save_checkpoint(
                 "epoch": epoch + 1,
                 "loss": loss_torch_epoch,
                 "num_train_timesteps": num_train_timesteps,
-                "shift_factor": shift_factor,
-                "scale_factor": scale_factor,
+                "src_shift_factor": src_shift_factor,
+                "src_scale_factor": src_scale_factor,
+                "tar_shift_factor": tar_shift_factor,
+                "tar_scale_factor": tar_scale_factor,
                 "unet_state_dict": unwrapped_unet.state_dict(),
             },
             f"{ckpt_folder}/{args.model_filename}",
@@ -541,10 +578,10 @@ def diff_model_train(
     )[accelerator.process_index]
 
     # Calculate scale factor locally then sync
-    shift_factor, scale_factor = calculate_scale_factor(train_files, accelerator, logger)
+    src_shift_factor, src_scale_factor, tar_shift_factor, tar_scale_factor = calculate_scale_factor(train_files, accelerator, logger)
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_train["num_validation_steps"],
-        input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
+        input_img_size_numel=torch.prod(torch.tensor(src_scale_factor.shape[2:])),
     )
 
     # Create DataLoader with local subset
@@ -599,8 +636,10 @@ def diff_model_train(
             optimizer,
             lr_scheduler,
             loss_pt,
-            shift_factor,
-            scale_factor,
+            src_shift_factor,
+            src_scale_factor,
+            tar_shift_factor,
+            tar_scale_factor,
             noise_scheduler,
             accelerator,
             logger,
@@ -624,8 +663,10 @@ def diff_model_train(
         eval_loss_torch = evaluate(
             unet,
             val_loader,
-            shift_factor,
-            scale_factor,
+            src_shift_factor,
+            src_scale_factor,
+            tar_shift_factor,
+            tar_scale_factor,
             noise_scheduler,
             accelerator,
             logger,
@@ -646,8 +687,10 @@ def diff_model_train(
             unet,
             loss_torch_epoch,
             args.noise_scheduler["num_train_timesteps"],
-            shift_factor,
-            scale_factor,
+            src_shift_factor,
+            src_scale_factor,
+            tar_shift_factor,
+            tar_scale_factor,
             args.model_dir,
             args,
             accelerator
