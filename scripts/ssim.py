@@ -6,8 +6,9 @@ from math import exp
 
 
 def gaussian(window_size):
-    var = window_size ** 2 / 12.0
-    gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * var)) for x in range(window_size)])
+    mean = window_size / 2
+    var = (window_size ** 2 - 1) / 12.0
+    gauss = torch.Tensor([exp(-(x - mean) ** 2 / float(2 * var)) for x in range(window_size)])
     # gauss = torch.ones(window_size, dtype=torch.float32)
     return gauss / gauss.sum()
 

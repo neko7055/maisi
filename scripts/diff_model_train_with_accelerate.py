@@ -39,26 +39,27 @@ class XSigmoidLoss(torch.nn.Module):
 
     def forward(self, y_t, y_prime_t):
         ey_t = y_t - y_prime_t
-        return torch.mean(2 * ey_t * torch.sigmoid(ey_t) - ey_t)
+        return torch.mean(ey_t * torch.tanh(ey_t / 2))
 
 
 class Loss(torch.nn.Module):
     def __init__(self, ):
         super().__init__()
-        self.l1_loss = torch.nn.L1Loss()
-        self.l2_loss = torch.nn.MSELoss()
-        self.ssim_5 = SSIM3D(window_size=5)
-        self.ssim_15 = SSIM3D(window_size=15)
-        self.ssim_25 = SSIM3D(window_size=25)
-        self.xsigmoidloss = XSigmoidLoss()
+        # self.l1_loss = torch.nn.L1Loss()
+        # self.l2_loss = torch.nn.MSELoss()
+        self.ssim_8 = SSIM3D(window_size=8)
+        self.ssim_16 = SSIM3D(window_size=16)
+        self.ssim_32 = SSIM3D(window_size=32)
+        self.ssim_64 = SSIM3D(window_size=64)
+        self.xsigmoid_loss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
-        l1 = self.l1_loss(outputs, targets) * 0.2
-        l2 = self.l2_loss(outputs, targets) * 0.1
-        ssim = (0.6 - 0.3 * self.ssim_25(outputs, targets) - 0.2 * self.ssim_15(outputs, targets) - 0.1 * self.ssim_5(
-            outputs, targets)) / 2
+        ssim = self.ssim_64(outputs, targets) * 0.4 + \
+               self.ssim_32(outputs, targets) * 0.3 + \
+               self.ssim_16(outputs, targets) * 0.2 + \
+               self.ssim_8(outputs, targets) * 0.1
         xsigmoid = self.xsigmoidloss(outputs, targets)
-        return l1 + l2 + ssim + xsigmoid
+        return ssim + xsigmoid
 
 
 def compile_unet_model(model):
@@ -220,13 +221,12 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
         all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
         median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
         mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
-        # Compute local std
         shift_factor = median_data
         scale_factor = 1 / mad
     else:
         # Fallback if a process has no data (unlikely with proper partition)
-        scale_factor = torch.tensor(1.0,device=accelerator.device, dtype=torch.float32)
-        shift_factor = torch.tensor(0.0,device=accelerator.device, dtype=torch.float32)
+        scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
+        shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
 
     # Distributed Sync: Average the scale factor across processes
     scale_factor = accelerator.reduce(scale_factor, reduction="mean").float()
