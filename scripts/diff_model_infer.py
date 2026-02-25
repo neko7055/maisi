@@ -90,7 +90,23 @@ def _load_json_field(file_path: str, key: str, convert_to_float: bool = True):
 # 模型載入
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def compile_model(model, shape, device):
+def compile_unet_model(model):
+    compile_module_list = ["conv_in", "down_blocks", "middle_block", "up_blocks", "out"]
+
+    for module_name in compile_module_list:
+        module = getattr(model, module_name, None)
+        if module is not None:
+            # 統一使用 .compile() 進行就地編譯，不分 Module 或 ModuleList
+            module.compile(
+                mode="max-autotune",
+                fullgraph=False,
+                dynamic=False,  # 若需動態解析度請改為 True
+                backend="inductor",
+            )
+
+    return model
+
+def compile_autoencoder_model(model, shape, device):
     """
     編譯 autoencoder 的 encode 方法，使用 torch.compile 而非私有 API。
     """
@@ -588,7 +604,8 @@ def diff_model_infer(
     autoencoder, unet, shift_factor, scale_factor = load_models(
         args, device, logger
     )
-    autoencoder = compile_model(autoencoder, args.diffusion_unet_inference["slide_window_size"], device)
+    unet = compile_unet_model(unet)
+    autoencoder = compile_autoencoder_model(autoencoder, args.diffusion_unet_inference["slide_window_size"], device)
 
     # ── Noise scheduler ──
     noise_scheduler = define_instance(args, "noise_scheduler")
