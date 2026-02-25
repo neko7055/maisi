@@ -499,7 +499,7 @@ def diff_model_train(
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
-    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=True), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
+    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
