@@ -217,24 +217,24 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
         tensor_list.append(d_transformed["tar_image"])
 
     if len(tensor_list) > 0:
-        all_data = torch.stack(tensor_list, dim=0)
-        Q1 = torch.quantile(all_data.to(accelerator.device), q=0.25, dim=0, keepdim=True, interpolation='linear')
-        Q2 = torch.quantile(all_data.to(accelerator.device), q=0.5, dim=0, keepdim=True, interpolation='linear')
-        Q3 = torch.quantile(all_data.to(accelerator.device), q=0.75, dim=0, keepdim=True, interpolation='linear')
+        all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
+        median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
+        mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
         # Compute local std
-        shift_factor = Q2
-        local_iqr = Q3 - Q1
-        # For simplicity in distributed setting, we might want to average the values or gather.
-        # Original code reduced the scale_factor.
-        scale_factor = 1 / local_iqr
+        shift_factor = median_data
+        scale_factor = 1 / mad
     else:
         # Fallback if a process has no data (unlikely with proper partition)
-        scale_factor = torch.tensor(1.0).to(accelerator.device)
-        shift_factor = torch.tensor(0.0).to(accelerator.device)
+        scale_factor = torch.tensor(1.0,device=accelerator.device, dtype=torch.float32)
+        shift_factor = torch.tensor(0.0,device=accelerator.device, dtype=torch.float32)
 
     # Distributed Sync: Average the scale factor across processes
-    scale_factor = accelerator.reduce(scale_factor, reduction="mean")
-    shift_factor = accelerator.reduce(shift_factor, reduction="mean")
+    scale_factor = accelerator.reduce(scale_factor, reduction="mean").float()
+    shift_factor = accelerator.reduce(shift_factor, reduction="mean").float()
+
+    # replace inf/nan with finite numbers to avoid issues in training
+    scale_factor = torch.where(torch.isfinite(scale_factor), scale_factor, torch.tensor(1.0, device=scale_factor.device, dtype=torch.float32))
+    shift_factor = torch.where(torch.isfinite(shift_factor), shift_factor, torch.tensor(0.0, device=scale_factor.device, dtype=torch.float32))
 
     logger.info(f"Scale factor is valid -> {torch.isfinite(scale_factor).all().item()}.")
     logger.info(f"scale_factor -> {scale_factor}.")
