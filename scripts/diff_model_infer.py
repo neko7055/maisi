@@ -102,7 +102,7 @@ def compile_model(model, shape, device):
         backend="inductor",
     )
     # warmup: 觸發編譯
-    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float16):
+    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
             example_inputs = torch.randn(1, 1, *shape, device=device)
             _ = model.decode(example_inputs)
     return model
@@ -492,7 +492,7 @@ def run_inference(
 
             # Decode latent → image
         with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.float16
+                device_type=device.type, enabled=True, dtype=torch.bfloat16
         ):
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
 
@@ -570,7 +570,8 @@ def diff_model_infer(
         args.autoencoder_def["num_splits"] = args.diffusion_unet_inference[
             "autoencoder_tp_num_splits"
         ]
-
+    args.autoencoder_def["save_mem"] = False
+    args.autoencoder_def["norm_float16"] = False
     local_rank, world_size, device = initialize_distributed(num_gpus)
     logger = setup_logging("inference")
 

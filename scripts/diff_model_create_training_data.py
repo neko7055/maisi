@@ -50,7 +50,7 @@ def compile_model(model, shape, device):
         backend="inductor",
     )
     # warmup: 觸發編譯
-    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float16):
+    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
             example_inputs = torch.randn(1, 1, *shape, device=device)
             _ = model.encode(example_inputs)
     return model
@@ -286,7 +286,7 @@ def process_batch(
     all_futures = []
     for key in ("src", "tar"):
         pt_nda = batch_data[f"{key}_image"].to(device) # size: [B, C, X, Y, Z]
-        with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.float16):
+        with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
             z_mu, z_log_var = dynamic_infer(inferer, autoencoder.encode, pt_nda)
             logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
         out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1).copy() # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
@@ -332,7 +332,8 @@ def diff_model_create_training_data(
         args.autoencoder_def["num_splits"] = args.transform_to_laten[
             "autoencoder_tp_num_splits"
         ]
-
+    args.autoencoder_def["save_mem"] = False
+    args.autoencoder_def["norm_float16"] = False
     # ── Initialize distributed ──
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
     logger = setup_logging("creating training data", rk_filter=False)
