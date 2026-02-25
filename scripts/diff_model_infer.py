@@ -118,7 +118,7 @@ def compile_autoencoder_model(model, shape, device):
         backend="inductor",
     )
     # warmup: 觸發編譯
-    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
+    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float32):
             example_inputs = torch.randn(1, 1, *shape, device=device)
             _ = model.decode(example_inputs)
     return model
@@ -508,7 +508,7 @@ def run_inference(
 
             # Decode latent → image
         with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.bfloat16
+                device_type=device.type, enabled=True, dtype=torch.float32
         ):
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
 
