@@ -1,5 +1,5 @@
 import os
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import json
 from collections import OrderedDict
 from monai.config import print_config
