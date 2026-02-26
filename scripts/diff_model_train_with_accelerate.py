@@ -76,7 +76,7 @@ def compile_unet_model(model):
             module.compile(
                 mode="max-autotune",
                 fullgraph=False,
-                dynamic=False,  # 若需動態解析度請改為 True
+                dynamic=True,
                 backend="inductor",
             )
 
