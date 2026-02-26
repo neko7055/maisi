@@ -53,7 +53,7 @@ class Loss(torch.nn.Module):
         self.ssim_32 = SSIM3D(window_size=33)
         self.ssim_64 = SSIM3D(window_size=65)
         # self.ssim_15 = SSIM3D(window_size=15)
-        #self.xsigmoidloss = XSigmoidLoss()
+        # self.xsigmoidloss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
         ssim = self.ssim_64(outputs, targets) * 0.4 + \
