@@ -66,7 +66,7 @@ class Loss(torch.nn.Module):
         return ssim * 0.8 + l1 * 0.2
 
 
-def compile_unet_model(model):
+def compile_unet_model(model, logger):
     compile_module_list = ["conv_in", "down_blocks", "middle_block", "up_blocks", "out"]
 
     for module_name in compile_module_list:
@@ -79,6 +79,7 @@ def compile_unet_model(model):
                 dynamic=True,
                 backend="inductor",
             )
+            logger.info(f"Compiled {module_name} with max-autotune.")
 
     return model
 
@@ -634,7 +635,7 @@ def diff_model_train(
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
-    unet = compile_unet_model(unet)
+    unet = compile_unet_model(unet, logger)
 
 
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
