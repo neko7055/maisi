@@ -73,7 +73,7 @@ model_config_out["transform_to_laten"]["num_workers"] = 4
 
 model_config_out["diffusion_unet_train"] = OrderedDict()
 model_config_out["diffusion_unet_train"]["batch_size"] = 1
-model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 4
+model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 8
 model_config_out["diffusion_unet_train"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_train"]["num_workers"] = 4
 model_config_out["diffusion_unet_train"]["lr"] = 0.0001
