@@ -46,21 +46,24 @@ class XSigmoidLoss(torch.nn.Module):
 class Loss(torch.nn.Module):
     def __init__(self, ):
         super().__init__()
-        # self.l1_loss = torch.nn.L1Loss()
+        self.l1_loss = torch.nn.L1Loss()
         # self.l2_loss = torch.nn.MSELoss()
-        self.ssim_8 = SSIM3D(window_size=9)
-        self.ssim_16 = SSIM3D(window_size=17)
-        self.ssim_32 = SSIM3D(window_size=33)
-        self.ssim_64 = SSIM3D(window_size=65)
-        self.xsigmoidloss = XSigmoidLoss()
+        # self.ssim_8 = SSIM3D(window_size=9)
+        # self.ssim_16 = SSIM3D(window_size=17)
+        # self.ssim_32 = SSIM3D(window_size=33)
+        # self.ssim_64 = SSIM3D(window_size=65)
+        self.ssim_15 = SSIM3D(window_size=15)
+        $self.xsigmoidloss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
-        ssim = self.ssim_64(outputs, targets) * 0.4 + \
-               self.ssim_32(outputs, targets) * 0.3 + \
-               self.ssim_16(outputs, targets) * 0.2 + \
-               self.ssim_8(outputs, targets) * 0.1
-        xsigmoid = self.xsigmoidloss(outputs, targets)
-        return ssim + xsigmoid
+        # ssim = self.ssim_64(outputs, targets) * 0.4 + \
+        #        self.ssim_32(outputs, targets) * 0.3 + \
+        #        self.ssim_16(outputs, targets) * 0.2 + \
+        #        self.ssim_8(outputs, targets) * 0.1
+
+        ssim = self.ssim_15(outputs, targets)
+        l1 = self.l1_loss(outputs, targets)
+        return ssim * 0.8 + l1 * 0.2
 
 
 def compile_unet_model(model):
@@ -206,10 +209,10 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     def _calculate(tensor_list):
         if len(tensor_list) > 0:
             all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
-            mean = torch.mean(all_data, dim=0, keepdim=True)
-            std = torch.std(all_data, dim=0, keepdim=True)
-            #median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
-            #mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
+            mean = torch.mean(all_data, dim=[0, 2, 3, 4], keepdim=True)
+            std = torch.std(all_data, dim=[0, 2, 3, 4], keepdim=True, correction=0)
+            #median_data = torch.quantile(all_data, 0.5, dim=1, keepdim=False)
+            #mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=1, keepdim=False) * 1.4826
             shift_factor = mean#median_data
             scale_factor = 1 / std#mad
         else:
@@ -547,7 +550,7 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
+    noise_scheduler.step = MethodType(midpoint_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
     noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
 
     include_body_region = unet.include_top_region_index_input
@@ -631,12 +634,7 @@ def diff_model_train(
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
-    start_time = time.perf_counter()
     unet = compile_unet_model(unet)
-    end_time = time.perf_counter()
-    elapsed_time = end_time - start_time
-    if accelerator.is_main_process:
-        logger.info(f"Model compilation completed, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
 
 
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
