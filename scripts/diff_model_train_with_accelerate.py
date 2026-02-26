@@ -244,7 +244,7 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
     optimizer = Lion(model.parameters(), lr=lr)
     optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
-    #ptimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    #ptimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
     return optimizer
 
 
