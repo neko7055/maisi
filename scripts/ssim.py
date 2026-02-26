@@ -65,9 +65,6 @@ class MS_SSIM3D(torch.nn.Module):
         self.weights = weights
 
     def forward(self, img1, img2):
-        assert img1.size() == img2.size()
-        assert img1 % 2** len(self.weights) == 0
-        assert img2 % 2** len(self.weights) == 0
         ssim = 0.0
         for w in self.weights:
             ssim += w * _ssim_3D(img1, img2, self.window, self.window_size, self.channel)
