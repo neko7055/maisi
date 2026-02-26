@@ -19,7 +19,7 @@ def create_window_3D(window_size, channel):
     window = _3D_window.expand(channel, 1, window_size, window_size, window_size).contiguous()
     return window
 
-@torch.compile(mode="max-autotune", backend="inductor", dynamic=False, fullgraph=False)
+#@torch.compile(mode="max-autotune", backend="inductor", dynamic=False, fullgraph=False)
 def _ssim_3D(img1, img2, window, window_size, channel):
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
@@ -55,6 +55,25 @@ class SSIM3D(torch.nn.Module):
 
     def forward(self, img1, img2):
         return _ssim_3D(img1, img2, self.window, self.window_size, self.channel)
+
+class MS_SSIM3D(torch.nn.Module):
+    def __init__(self, weights, window_size=11,channel=4):
+        super(MS_SSIM3D, self).__init__()
+        self.window_size = window_size
+        self.channel = channel
+        self.register_buffer('window', create_window_3D(window_size, self.channel))
+        self.weights = weights
+
+    def forward(self, img1, img2):
+        assert img1.size() == img2.size()
+        assert img1 % 2** len(self.weights) == 0
+        assert img2 % 2** len(self.weights) == 0
+        ssim = 0.0
+        for w in self.weights:
+            ssim += w * _ssim_3D(img1, img2, self.window, self.window_size, self.channel)
+            img1 = F.avg_pool3d(img1, kernel_size=2, stride=2)
+            img2 = F.avg_pool3d(img2, kernel_size=2, stride=2)
+        return ssim
 
 
 def ssim3D(img1, img2, window_size=11):

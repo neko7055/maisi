@@ -26,7 +26,7 @@ from .optimizer import Lion, Lookahead
 from .diff_model_setting import load_config, setup_logging
 from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
-from .ssim import SSIM3D
+from .ssim import MS_SSIM3D
 from .utils import define_instance
 
 # torch.set_float32_matmul_precision('high')
@@ -48,18 +48,12 @@ class Loss(torch.nn.Module):
         super().__init__()
         # self.l1_loss = torch.nn.L1Loss()
         # self.l2_loss = torch.nn.MSELoss()
-        self.ssim_8 = SSIM3D(window_size=9)
-        self.ssim_16 = SSIM3D(window_size=17)
-        self.ssim_32 = SSIM3D(window_size=33)
-        self.ssim_64 = SSIM3D(window_size=65)
+        self.ms_ssim = MS_SSIM3D(weights=[0.4, 0.3, 0.2, 0.1], window_size=3)
         # self.ssim_15 = SSIM3D(window_size=15)
         self.xsigmoidloss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
-        ssim = self.ssim_64(outputs, targets) * 0.4 + \
-               self.ssim_32(outputs, targets) * 0.3 + \
-               self.ssim_16(outputs, targets) * 0.2 + \
-               self.ssim_8(outputs, targets) * 0.1
+        ssim = self.ms_ssim(outputs, targets)
 
         ssim_loss = (1-ssim) / 2
         xsigmoidloss = self.xsigmoidloss(outputs, targets)
