@@ -75,7 +75,7 @@ def compile_unet_model(model, logger):
             module.compile(
                 mode="max-autotune",
                 fullgraph=False,
-                dynamic=True,
+                dynamic=False,
                 backend="inductor",
             )
             logger.info(f"Compiled {module_name} with max-autotune.")
@@ -634,7 +634,7 @@ def diff_model_train(
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
-    unet = compile_unet_model(unet, logger)
+    # unet = compile_unet_model(unet, logger)
 
 
     for epoch in range(args.diffusion_unet_train["n_epochs"]):

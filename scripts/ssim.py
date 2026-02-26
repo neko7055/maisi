@@ -19,8 +19,8 @@ def create_window_3D(window_size, channel):
     window = _3D_window.expand(channel, 1, window_size, window_size, window_size).contiguous()
     return window
 
-@torch.compile(mode="max-autotune", backend="inductor", dynamic=True, fullgraph=False)
-def _ssim_3D(img1, img2, window, window_size, channel, size_average=True):
+@torch.compile(mode="max-autotune", backend="inductor", dynamic=False, fullgraph=False)
+def _ssim_3D(img1, img2, window, window_size, channel):
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
 
@@ -45,25 +45,21 @@ def _ssim_3D(img1, img2, window, window_size, channel, size_average=True):
 
     ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
 
-    if size_average:
-        return ssim_map.mean()
-    else:
-        return ssim_map.mean(1).mean(1).mean(1)
+    return ssim_map.mean()
 
 
 class SSIM3D(torch.nn.Module):
-    def __init__(self, window_size=11,channel=4, size_average=True):
+    def __init__(self, window_size=11,channel=4):
         super(SSIM3D, self).__init__()
         self.window_size = window_size
-        self.size_average = size_average
         self.channel = channel
         self.register_buffer('window', create_window_3D(window_size, self.channel))
 
     def forward(self, img1, img2):
-        return _ssim_3D(img1, img2, self.window, self.window_size, self.channel, self.size_average)
+        return _ssim_3D(img1, img2, self.window, self.window_size, self.channel)
 
 
-def ssim3D(img1, img2, window_size=11, size_average=True):
+def ssim3D(img1, img2, window_size=11):
     (_, channel, _, _, _) = img1.size()
     window = create_window_3D(window_size, channel)
 
@@ -71,4 +67,4 @@ def ssim3D(img1, img2, window_size=11, size_average=True):
         window = window.cuda(img1.get_device())
     window = window.type_as(img1)
 
-    return _ssim_3D(img1, img2, window, window_size, channel, size_average)
+    return _ssim_3D(img1, img2, window, window_size, channel)
