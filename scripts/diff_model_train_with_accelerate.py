@@ -48,22 +48,22 @@ class Loss(torch.nn.Module):
         super().__init__()
         self.l1_loss = torch.nn.L1Loss()
         # self.l2_loss = torch.nn.MSELoss()
-        # self.ssim_8 = SSIM3D(window_size=9)
-        # self.ssim_16 = SSIM3D(window_size=17)
-        # self.ssim_32 = SSIM3D(window_size=33)
-        # self.ssim_64 = SSIM3D(window_size=65)
-        self.ssim_15 = SSIM3D(window_size=15)
+        self.ssim_8 = SSIM3D(window_size=9)
+        self.ssim_16 = SSIM3D(window_size=17)
+        self.ssim_32 = SSIM3D(window_size=33)
+        self.ssim_64 = SSIM3D(window_size=65)
+        # self.ssim_15 = SSIM3D(window_size=15)
         #self.xsigmoidloss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
-        # ssim = self.ssim_64(outputs, targets) * 0.4 + \
-        #        self.ssim_32(outputs, targets) * 0.3 + \
-        #        self.ssim_16(outputs, targets) * 0.2 + \
-        #        self.ssim_8(outputs, targets) * 0.1
+        ssim = self.ssim_64(outputs, targets) * 0.4 + \
+               self.ssim_32(outputs, targets) * 0.3 + \
+               self.ssim_16(outputs, targets) * 0.2 + \
+               self.ssim_8(outputs, targets) * 0.1
 
-        ssim = self.ssim_15(outputs, targets)
+        ssim_loss = (1-ssim) / 2
         l1 = self.l1_loss(outputs, targets)
-        return ssim * 0.8 + l1 * 0.2
+        return ssim_loss * 0.8 + l1 * 0.2
 
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)

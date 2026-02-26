@@ -23,11 +23,9 @@ def create_window_3D(window_size, channel):
 def _ssim_3D(img1, img2, window, window_size, channel):
     C1 = 0.01 ** 2
     C2 = 0.03 ** 2
-
-    padd = window_size // 2
     concat = torch.cat([img1, img2, img1 * img1, img2 * img2, img1 * img2], dim=1)
     window_all = window.repeat(5, 1, 1, 1, 1)
-    out = F.conv3d(concat, window_all, padding=padd, groups=channel * 5)
+    out = F.conv3d(concat, window_all, padding='same', groups=channel * 5)
     mu1, mu2, sigma1_sq, sigma2_sq, sigma12 = out.chunk(5, dim=1)
     #mu1 = F.conv3d(img1, window, padding=window_size // 2, groups=channel)
     #mu2 = F.conv3d(img2, window, padding=window_size // 2, groups=channel)
