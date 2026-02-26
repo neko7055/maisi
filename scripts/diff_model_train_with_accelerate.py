@@ -65,23 +65,6 @@ class Loss(torch.nn.Module):
         l1 = self.l1_loss(outputs, targets)
         return ssim * 0.8 + l1 * 0.2
 
-
-def compile_unet_model(model, logger):
-    compile_module_list = ["conv_in", "down_blocks", "middle_block", "up_blocks", "out"]
-    for module_name in compile_module_list:
-        module = getattr(model.module, module_name, None)
-        if module is not None:
-            # 統一使用 .compile() 進行就地編譯，不分 Module 或 ModuleList
-            module.compile(
-                mode="max-autotune",
-                fullgraph=False,
-                dynamic=False,
-                backend="inductor",
-            )
-            logger.info(f"Compiled {module_name} with max-autotune.")
-
-    return model
-
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
     mask_ct = (modality_tensor < 8) and (modality_tensor >= 2)
@@ -634,8 +617,6 @@ def diff_model_train(
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
-    # unet = compile_unet_model(unet, logger)
-
 
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
         start_time = time.perf_counter()
