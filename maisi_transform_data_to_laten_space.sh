@@ -47,4 +47,3 @@ duration=$((end_time - start_time))
 minutes=$((duration / 60))
 seconds=$((duration % 60))
 echo "Execution time: ${minutes} minutes ${seconds} seconds"
-#/mnt/home/r12946008-ntu_-ff621a/maisi/logs/
