@@ -337,7 +337,7 @@ def evaluate(
 
         all_timesteps = noise_scheduler.timesteps
         all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
-
+        all_timesteps,  all_next_timesteps= torch.flip(all_next_timesteps, dims=[-1]), torch.flip(all_timesteps, dims=[-1])
         mu_t = src_images
         with torch.inference_mode():
             for t, next_t in zip(all_timesteps, all_next_timesteps):

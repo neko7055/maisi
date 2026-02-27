@@ -38,14 +38,13 @@ def construct_rk5():
 
 def euler_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
-        next_timestep = next_timestep
-        dt: float = (
-                float(timestep - next_timestep) / self.num_train_timesteps
-        )  # Now next_timestep is guaranteed to be int
+        dt_org = float(next_timestep - timestep)
+        dt: float = dt_org / self.num_train_timesteps
     else:
         dt = (
             1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
         )  # Avoid division by zero
+        dt_org = dt * self.num_train_timesteps
     v_pred = f(timestep, sample)
     pred_post_sample = sample + v_pred * dt
     pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
@@ -54,8 +53,7 @@ def euler_step(self, f, timestep, sample, next_timestep=None):
 
 def midpoint_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
-        next_timestep = next_timestep
-        dt_org = float(timestep - next_timestep)
+        dt_org = float(next_timestep - timestep)
         dt: float = dt_org / self.num_train_timesteps
     else:
         dt = (
@@ -71,8 +69,7 @@ def midpoint_step(self, f, timestep, sample, next_timestep=None):
 
 def rk4_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
-        next_timestep = next_timestep
-        dt_org = float(timestep - next_timestep)
+        dt_org = float(next_timestep - timestep)
         dt: float = dt_org / self.num_train_timesteps
     else:
         dt = (
@@ -97,8 +94,7 @@ def rk4_step(self, f, timestep, sample, next_timestep=None):
 
 def rk5_step(self, f, timestep, sample, next_timestep=None):
     if next_timestep is not None:
-        next_timestep = next_timestep
-        dt_org = float(timestep - next_timestep)
+        dt_org = float(next_timestep - timestep)
         dt: float = dt_org / self.num_train_timesteps
     else:
         dt = (
