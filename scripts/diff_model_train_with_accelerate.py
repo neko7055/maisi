@@ -57,19 +57,18 @@ class Loss(torch.nn.Module):
 
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
-    mask_ct = (modality_tensor < 8) and (modality_tensor >= 2)
+    mask_ct = torch.logical_and((modality_tensor < 8), (modality_tensor >= 2))
     prob_ct = torch.rand(modality_tensor.size(), device=modality_tensor.device) < prob
-    modality_tensor[mask_ct & prob_ct] = 1
+    modality_tensor[torch.logical_and(mask_ct, prob_ct)] = 1
 
     mask_mri = (modality_tensor >= 9)
     prob_mri = torch.rand(modality_tensor.size(), device=modality_tensor.device) < prob
-    modality_tensor[mask_mri & prob_mri] = 8
+    modality_tensor[torch.logical_and(mask_mri, prob_mri)] = 8
 
     mask_zero = torch.rand(modality_tensor.size(), device=modality_tensor.device) > prob
     modality_tensor = modality_tensor * mask_zero.long()
 
     return modality_tensor
-
 
 def prepare_file_list(filenames, embedding_base_dir, mode, include_body_region, include_modality):
     # Prepare file list
@@ -433,7 +432,7 @@ def train_one_epoch(
 
         if include_modality:
             modality_tensor = train_data["modality"].to(device, non_blocking=True)
-            modality_tensor = augment_modality_label(modality_tensor).to(device)
+            modality_tensor = augment_modality_label(modality_tensor).to(device, non_blocking=True)
             unet_inputs.update({"class_labels": modality_tensor})
 
         # Accelerate handles mixed precision automatically if configured
