@@ -46,15 +46,11 @@ class XSigmoidLoss(torch.nn.Module):
 class Loss(torch.nn.Module):
     def __init__(self, ):
         super().__init__()
-        # self.l1_loss = torch.nn.L1Loss()
-        # self.l2_loss = torch.nn.MSELoss()
         self.ms_ssim = MS_SSIM3D(weights=[0.4, 0.3, 0.2, 0.1], window_size=3)
-        # self.ssim_15 = SSIM3D(window_size=15)
         self.xsigmoidloss = XSigmoidLoss()
 
     def forward(self, outputs, targets):
         ssim = self.ms_ssim(outputs, targets)
-
         ssim_loss = (1-ssim) / 2
         xsigmoidloss = self.xsigmoidloss(outputs, targets)
         return ssim_loss * 0.8 + xsigmoidloss * 0.2
