@@ -1,6 +1,6 @@
 import torch
 
-def linear_interpolate(self, sources, targets, timesteps, add_noise=False) :
+def linear_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1e-08) :
     timepoints = timesteps.float() / self.num_train_timesteps
     assert sources.shape == targets.shape
     # expand timepoint to noise shape
@@ -15,13 +15,13 @@ def linear_interpolate(self, sources, targets, timesteps, add_noise=False) :
     d_mu_t = targets - sources
     if add_noise:
         z_coef = torch.sqrt(2 * timepoints * (1 - timepoints))
-        dz_coef = (1 - 2 * timepoints) / torch.sqrt(2 * timepoints * (1 - timepoints))
+        dz_coef = (1 - 2 * timepoints) / torch.clamp(z_coef, min=eps)
         noise = torch.randn_like(mu_t)
         return mu_t + z_coef * noise, d_mu_t + dz_coef * noise
     else:
         return mu_t, d_mu_t
 
-def triangular_interpolate(self, sources, targets, timesteps, add_noise=False) :
+def triangular_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1e-08) :
     timepoints = timesteps.float() / self.num_train_timesteps
     assert sources.shape == targets.shape
     # expand timepoint to noise shape
@@ -39,7 +39,7 @@ def triangular_interpolate(self, sources, targets, timesteps, add_noise=False) :
 
     if add_noise:
         gamma = torch.sqrt(2 * timepoints * (1 - timepoints))
-        d_gamma = (1 - 2 * timepoints) / torch.sqrt(2 * timepoints * (1 - timepoints))
+        d_gamma = (1 - 2 * timepoints) / torch.clamp(gamma, min=eps)
         z_coef = gamma
         dz_coef = d_gamma
         noise = torch.randn_like(mu_t)
