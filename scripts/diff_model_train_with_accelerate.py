@@ -414,7 +414,7 @@ def train_one_epoch(
         # Logic remains same
         assert isinstance(noise_scheduler, RFlowScheduler), "Currently we only support RFlowScheduler for training, please check your config and model definition."
         with accelerator.accumulate(unet):
-            loss = torch.zeros(device=accelerator.device, dtype=torch.float32)
+            loss = torch.zeros(1, device=accelerator.device, dtype=torch.float32)
             for _ in range(time_batch_size):
                 timesteps = noise_scheduler.sample_timesteps(src_images)
 
