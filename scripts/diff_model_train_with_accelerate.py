@@ -181,12 +181,12 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     def _calculate(tensor_list):
         if len(tensor_list) > 0:
             all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
-            mean = torch.mean(all_data, dim=[0, 2, 3, 4], keepdim=True)
-            std = torch.std(all_data, dim=[0, 2, 3, 4], keepdim=True, correction=0)
-            #median_data = torch.quantile(all_data, 0.5, dim=1, keepdim=False)
-            #mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=1, keepdim=False) * 1.4826
-            shift_factor = mean#median_data
-            scale_factor = 1 / std#mad
+            #mean = torch.mean(all_data, dim=[0, 2, 3, 4], keepdim=True)
+            #std = torch.std(all_data, dim=[0, 2, 3, 4], keepdim=True, correction=0)
+            median_data = torch.quantile(all_data, 0.5, dim=1, keepdim=True)
+            mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=1, keepdim=True) * 1.4826
+            shift_factor = median_data
+            scale_factor = 1 / mad
         else:
             # Fallback if a process has no data (unlikely with proper partition)
             scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
@@ -380,6 +380,7 @@ def train_one_epoch(
         logger: logging.Logger,
         include_body_region,
         include_modality,
+        time_batch_size: int,
         gradient_accumulation_steps: int
 ) -> torch.Tensor:
     # Handle DDP wrapping access
@@ -412,35 +413,38 @@ def train_one_epoch(
 
         # Logic remains same
         assert isinstance(noise_scheduler, RFlowScheduler), "Currently we only support RFlowScheduler for training, please check your config and model definition."
-        timesteps = noise_scheduler.sample_timesteps(src_images)
-
-        mu_t, d_mu_t = noise_scheduler.add_noise(src_images, tar_images, timesteps)
-
-        unet_inputs = {
-            "x": mu_t,
-            "timesteps": timesteps,
-            "spacing_tensor": spacing_tensor,
-        }
-
-        if include_body_region:
-            top_region_index_tensor = train_data["top_region_index"].to(device, non_blocking=True)
-            bottom_region_index_tensor = train_data["bottom_region_index"].to(device, non_blocking=True)
-            unet_inputs.update({
-                "top_region_index_tensor": top_region_index_tensor,
-                "bottom_region_index_tensor": bottom_region_index_tensor,
-            })
-
-        if include_modality:
-            modality_tensor = train_data["modality"].to(device, non_blocking=True)
-            modality_tensor = augment_modality_label(modality_tensor).to(device, non_blocking=True)
-            unet_inputs.update({"class_labels": modality_tensor})
-
-        # Accelerate handles mixed precision automatically if configured
         with accelerator.accumulate(unet):
-            model_output = unet(**unet_inputs)
-            loss = loss_pt(model_output, d_mu_t)
+            loss = torch.zeros(device=accelerator.device, dtype=torch.float32)
+            for _ in range(time_batch_size):
+                timesteps = noise_scheduler.sample_timesteps(src_images)
 
-            # Replaced backward with accelerator
+                mu_t, d_mu_t = noise_scheduler.add_noise(src_images, tar_images, timesteps)
+
+                unet_inputs = {
+                    "x": mu_t,
+                    "timesteps": timesteps,
+                    "spacing_tensor": spacing_tensor,
+                }
+
+                if include_body_region:
+                    top_region_index_tensor = train_data["top_region_index"].to(device, non_blocking=True)
+                    bottom_region_index_tensor = train_data["bottom_region_index"].to(device, non_blocking=True)
+                    unet_inputs.update({
+                        "top_region_index_tensor": top_region_index_tensor,
+                        "bottom_region_index_tensor": bottom_region_index_tensor,
+                    })
+
+                if include_modality:
+                    modality_tensor = train_data["modality"].to(device, non_blocking=True)
+                    modality_tensor = augment_modality_label(modality_tensor).to(device, non_blocking=True)
+                    unet_inputs.update({"class_labels": modality_tensor})
+
+                with accelerator.autocast():
+                    model_output = unet(**unet_inputs)
+                    loss_current = loss_pt(model_output, d_mu_t)
+
+                loss = loss + loss_current.float()
+            loss = loss / time_batch_size
             accelerator.backward(loss)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
@@ -627,6 +631,7 @@ def diff_model_train(
             logger,
             include_body_region,
             include_modality,
+            args.diffusion_unet_train["time_batch_size"],
             args.diffusion_unet_train["gradient_accumulation_steps"]
         )
         end_time = time.perf_counter()
