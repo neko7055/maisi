@@ -34,26 +34,29 @@ from .utils import define_instance
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
 
+def x_sigmoid_loss(y_t, y_prime_t):
+    ey_t = y_t - y_prime_t
+    return torch.mean(ey_t * torch.tanh(ey_t / 2))
+
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, y_t, y_prime_t):
-        ey_t = y_t - y_prime_t
-        return torch.mean(ey_t * torch.tanh(ey_t / 2))
+        return x_sigmoid_loss(y_t, y_prime_t)
 
-
-class Loss(torch.nn.Module):
-    def __init__(self, ):
+class MSXSigmoidLoss(torch.nn.Module):
+    def __init__(self, weights):
         super().__init__()
-        self.ms_ssim = MS_SSIM3D(weights=[0.4, 0.3, 0.2, 0.1], window_size=3)
-        self.xsigmoidloss = XSigmoidLoss()
+        self.weights = weights
 
-    def forward(self, outputs, targets):
-        ssim = self.ms_ssim(outputs, targets)
-        ssim_loss = (1-ssim) / 2
-        xsigmoidloss = self.xsigmoidloss(outputs, targets)
-        return ssim_loss * 0.8 + xsigmoidloss * 0.2
+    def forward(self, y_t, y_prime_t):
+        loss = self.weights[0] * x_sigmoid_loss(y_t, y_prime_t)
+        for w in self.weights[1:]:
+            y_t = torch.nn.functional.avg_pool3d(y_t, kernel_size=2, stride=2)
+            y_prime_t = torch.nn.functional.avg_pool3d(y_prime_t, kernel_size=2, stride=2)
+            loss += w * x_sigmoid_loss(y_t, y_prime_t)
+        return loss
 
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
@@ -179,19 +182,22 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
 def calculate_scale_factor(train_files, accelerator: Accelerator, logger: logging.Logger) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     def _calculate(tensor_list):
-        if len(tensor_list) > 0:
-            all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
-            #mean = torch.mean(all_data, dim=[0, 2, 3, 4], keepdim=True)
-            #std = torch.std(all_data, dim=[0, 2, 3, 4], keepdim=True, correction=0)
-            median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
-            mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
-            shift_factor = median_data
-            scale_factor = 1 / mad
-        else:
-            # Fallback if a process has no data (unlikely with proper partition)
-            scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
-            shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
+        scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
+        shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
         return shift_factor, scale_factor
+        # if len(tensor_list) > 0:
+        #     all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
+        #     #mean = torch.mean(all_data, dim=[0, 2, 3, 4], keepdim=True)
+        #     #std = torch.std(all_data, dim=[0, 2, 3, 4], keepdim=True, correction=0)
+        #     median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
+        #     mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
+        #     shift_factor = median_data
+        #     scale_factor = 1 / mad
+        # else:
+        #     # Fallback if a process has no data (unlikely with proper partition)
+        #     scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
+        #     shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
+        # return shift_factor, scale_factor
     # (Calculates scale factor locally then syncs across processes)
     data_transforms_list = [
         monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
@@ -237,15 +243,15 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
-    optimizer = Lion(model.parameters(), lr=lr)
-    optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
-    #ptimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
+    #optimizer = Lion(model.parameters(), lr=lr)
+    #optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
     return optimizer
 
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int):
-    #return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
-    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps//100, eta_min=1e-6)
+    return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
+    #return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps//100, eta_min=1e-6)
 def _call_unet(
         unet: torch.nn.Module,
         x: torch.Tensor,
@@ -435,7 +441,7 @@ def train_one_epoch(
 
             if include_modality:
                 modality_tensor = train_data["modality"].to(device, non_blocking=True)
-                modality_tensor = augment_modality_label(modality_tensor).to(device, non_blocking=True)
+                # modality_tensor = augment_modality_label(modality_tensor).to(device, non_blocking=True)
                 unet_inputs.update({"class_labels": modality_tensor})
 
             with accelerator.accumulate(unet), accelerator.autocast():
@@ -450,15 +456,15 @@ def train_one_epoch(
         loss_torch[0] += loss_record
         loss_torch[1] += 1.0
 
-        if accelerator.is_main_process:
-            if _iter % gradient_accumulation_steps == 0:
-                logger.info(
-                    "[{0}] epoch {1}, iter {2}/{3}, loss: {4:.4f}, lr: {5:.12f}.".format(
-                        str(datetime.now())[:19], epoch + 1, _iter // gradient_accumulation_steps,
-                                                  len(train_loader) // gradient_accumulation_steps, loss.item(),
-                        current_lr
-                    )
+        # if accelerator.is_main_process:
+        if _iter % gradient_accumulation_steps == 0:
+            logger.info(
+                "[{0}] epoch {1}, iter {2}/{3}, loss: {4:.4f}, lr: {5:.12f}.".format(
+                    str(datetime.now())[:19], epoch + 1, _iter // gradient_accumulation_steps,
+                                              len(train_loader) // gradient_accumulation_steps, loss.item(),
+                    current_lr
                 )
+            )
 
     # Reduce loss for logging
     loss_torch = accelerator.reduce(loss_torch, reduction="sum")
@@ -534,8 +540,8 @@ def diff_model_train(
     args.noise_scheduler["scale"] = 1.0
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.sample_timesteps = MethodType(segment_sample_timesteps, noise_scheduler)
-    noise_scheduler.step = MethodType(midpoint_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
-    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
+    noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
+    noise_scheduler.add_noise = MethodType(partial(enc_dec_interpolate, add_noise=True), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
@@ -609,7 +615,7 @@ def diff_model_train(
     # Calculate steps based on local dataset size (approximate)
     total_steps = args.diffusion_unet_train["n_epochs"]
     lr_scheduler = create_lr_scheduler(optimizer, total_steps)
-    loss_pt = Loss().to(accelerator.device)
+    loss_pt = MSXSigmoidLoss([0.1, 0.2, 0.3, 0.4]).to(accelerator.device)
 
     # Prepare everything with Accelerate
     # NOTE: We do NOT pass train_loader here because we manually partitioned the dataset
