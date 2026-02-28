@@ -183,8 +183,8 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
             all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
             #mean = torch.mean(all_data, dim=[0, 2, 3, 4], keepdim=True)
             #std = torch.std(all_data, dim=[0, 2, 3, 4], keepdim=True, correction=0)
-            median_data = torch.quantile(all_data, 0.5, dim=1, keepdim=True)
-            mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=1, keepdim=True) * 1.4826
+            median_data = torch.quantile(all_data, 0.5, dim=0, keepdim=True)
+            mad = torch.quantile(torch.abs(all_data - median_data), 0.5, dim=0, keepdim=True) * 1.4826
             shift_factor = median_data
             scale_factor = 1 / mad
         else:
