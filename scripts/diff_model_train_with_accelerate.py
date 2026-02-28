@@ -244,8 +244,8 @@ def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer
 
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int) -> torch.optim.lr_scheduler.PolynomialLR:
-    return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
-
+    #return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
+    return torch.optim.lr_scheduler.cosineAnnealingLR(optimizer, total_iters=total_steps//100, eta_min=1e-6)
 def _call_unet(
         unet: torch.nn.Module,
         x: torch.Tensor,
