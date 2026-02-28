@@ -525,7 +525,7 @@ def diff_model_train(
                                                           args.diffusion_unet_train["time_batch_size"],
                               step_scheduler_with_optimizer=False)
 
-    logger = setup_logging("training")
+    logger = setup_logging("training", rk_filter=False)
 
     # Log device info
     logger.info(f"Process {accelerator.process_index} using device: {accelerator.device}")
