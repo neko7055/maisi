@@ -88,7 +88,7 @@ model_config_out["diffusion_unet_inference"]["sw_batch_size"] = 1
 model_config_out["diffusion_unet_inference"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_inference"]["num_workers"] = 4
 model_config_out["diffusion_unet_inference"]["num_inference_steps"] = 5
-model_config_out["diffusion_unet_inference"]["slide_window_size"] = [64, 64, 64]
+model_config_out["diffusion_unet_inference"]["slide_window_size"] = [16, 16, 16] # equal to [64, 64, 64] in encode
 model_config_out["diffusion_unet_inference"]["autoencoder_tp_num_splits"] = 1
 model_config_out["diffusion_unet_inference"]["random_seed"] = 41
 
