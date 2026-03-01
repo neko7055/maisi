@@ -162,12 +162,17 @@ def load_models(
     unet.eval()
     logger.info(f"checkpoints {args.model_dir}/{args.model_filename} loaded.")
 
-    shift_factor = checkpoint["shift_factor"]
-    scale_factor = checkpoint["scale_factor"]
-    logger.info(f"shift_factor -> {shift_factor}.")
-    logger.info(f"scale_factor -> {scale_factor}.")
+    src_shift_factor = checkpoint["src_shift_factor"]
+    src_scale_factor = checkpoint["src_scale_factor"]
+    tar_shift_factor = checkpoint["tar_shift_factor"]
+    tar_scale_factor = checkpoint["tar_scale_factor"]
 
-    return autoencoder, unet, shift_factor, scale_factor
+    logger.info(f"src_shift_factor -> {src_shift_factor}.")
+    logger.info(f"src_scale_factor -> {src_scale_factor}.")
+    logger.info(f"tar_shift_factor -> {tar_shift_factor}.")
+    logger.info(f"tar_scale_factor -> {tar_scale_factor}.")
+
+    return autoencoder, unet, src_shift_factor, src_scale_factor, tar_shift_factor, tar_scale_factor
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -405,8 +410,10 @@ def run_inference(
         unet: torch.nn.Module,
         autoencoder: torch.nn.Module,
         data_loader: DataLoader,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
+        src_shift_factor: torch.Tensor,
+        src_scale_factor: torch.Tensor,
+        tar_shift_factor: torch.Tensor,
+        tar_scale_factor: torch.Tensor,
         noise_scheduler: RFlowScheduler,
         inferer: SlidingWindowInferer,
         logger: logging.Logger,
@@ -452,7 +459,7 @@ def run_inference(
         # 原始碼: tar_images = eval_data["tar_image"].to(device)
 
         # Normalize
-        src_images = (src_images - shift_factor) * scale_factor
+        src_images = (src_images - src_shift_factor) * src_scale_factor
 
         top_region_index_tensor = None
         bottom_region_index_tensor = None
@@ -504,7 +511,7 @@ def run_inference(
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
 
             # Un-normalize
-            mu_t = mu_t * (1.0 / scale_factor) + shift_factor
+            mu_t = mu_t * (1.0 / tar_scale_factor) + tar_shift_factor
 
             # Decode latent → image
         with torch.inference_mode(), torch.autocast(
@@ -601,7 +608,7 @@ def diff_model_infer(
     )
 
     # ── 載入模型 ──
-    autoencoder, unet, shift_factor, scale_factor = load_models(
+    autoencoder, unet, src_shift_factor, src_scale_factor, tar_shift_factor, tar_scale_factor = load_models(
         args, device, logger
     )
     unet = compile_unet_model(unet, logger)
@@ -612,7 +619,7 @@ def diff_model_infer(
     noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
-        input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
+        input_img_size_numel=torch.prod(torch.tensor(src_scale_factor.shape[2:])),
     )
 
     # ── 條件輸入判斷 ──
@@ -712,8 +719,10 @@ def diff_model_infer(
                 unet=unet,
                 autoencoder=autoencoder,
                 data_loader=loader,
-                shift_factor=shift_factor,
-                scale_factor=scale_factor,
+                src_shift_factor=src_shift_factor,
+                src_scale_factor=src_scale_factor,
+                tar_shift_factor=tar_shift_factor,
+                tar_scale_factor=tar_scale_factor,
                 noise_scheduler=noise_scheduler,
                 inferer=inferer,
                 logger=logger,
