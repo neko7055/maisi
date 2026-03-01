@@ -119,7 +119,7 @@ def compile_autoencoder_model(model, shape, device):
     )
     # warmup: 觸發編譯
     with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float32):
-            example_inputs = torch.randn(1, 1, *shape, device=device)
+            example_inputs = torch.randn(1, 4, *shape, device=device)
             _ = model.decode(example_inputs)
     return model
 
