@@ -4,8 +4,8 @@
 #SBATCH --partition=normal
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=12
-#SBATCH --output=logs/infer_%j.out
-#SBATCH --error=logs/infer_%j.err
+#SBATCH --output=logs/rflow_infer_%j.out
+#SBATCH --error=logs/rflow_infer_%j.err
 
 #SBATCH --mail-type=BEGIN,END,FAIL               # send email at job start, end, and on failure
 #SBATCH --mail-user=r12946008@ntu.edu.tw        # your address
