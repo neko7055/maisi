@@ -615,6 +615,8 @@ def diff_model_infer(
     autoencoder = compile_autoencoder_model(autoencoder, args.diffusion_unet_inference["slide_window_size"], device)
 
     # ── Noise scheduler ──
+    args.noise_scheduler["use_timestep_transform"] = False
+    args.noise_scheduler["scale"] = 1.0
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
     noise_scheduler.set_timesteps(
