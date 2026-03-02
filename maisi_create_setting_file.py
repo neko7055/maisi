@@ -92,6 +92,21 @@ model_config_out["diffusion_unet_inference"]["slide_window_size"] = [16, 16, 16]
 model_config_out["diffusion_unet_inference"]["autoencoder_tp_num_splits"] = 1
 model_config_out["diffusion_unet_inference"]["random_seed"] = 41
 
+model_config_out["vae_train"] = OrderedDict()
+model_config_out["vae_train"]["data_option"] = OrderedDict()
+model_config_out["vae_train"]["data_option"]["random_aug"]= True
+model_config_out["vae_train"]["data_option"]["spacing_type"] = "rand_zoom"
+model_config_out["vae_train"]["data_option"]["spacing"] = None
+model_config_out["vae_train"]["data_option"]["select_channel"] = 0
+model_config_out["vae_train"]["autoencoder_train"] = OrderedDict()
+model_config_out["vae_train"]["autoencoder_train"]["batch_size"] = 16
+model_config_out["vae_train"]["autoencoder_train"]["gradient_accumulation_steps"] = 1
+model_config_out["vae_train"]["autoencoder_train"]["patch_size"] = [64, 64, 64]
+model_config_out["vae_train"]["autoencoder_train"]["lr"] =0.0001
+model_config_out["vae_train"]["autoencoder_train"]["cache_rate"] = 1
+model_config_out["vae_train"]["autoencoder_train"]["n_epochs"] = 1000
+model_config_out["vae_train"]["autoencoder_train"]["num_workers"] = 4
+
 model_config_out["dino_finetune"] = OrderedDict()
 model_config_out["dino_finetune"]["batch_size"] = 4
 model_config_out["dino_finetune"]["gradient_accumulation_steps"] = 4
