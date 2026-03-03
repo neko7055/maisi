@@ -84,8 +84,9 @@ class Loss(torch.nn.Module):
         self.window_size = window_size
 
     def _loss(self, y_t, y_prime_t):
+        mse_loss = torch.nn.functional.mse_loss(y_t, y_prime_t)
         loss = (1 - _ssim_3D(y_t, y_prime_t, window_size=self.window_size)) / 2 * 0.8 + x_sigmoid_loss(y_t, y_prime_t) * 0.2
-        return loss
+        return loss + mse_loss
 
     def forward(self, y_t, y_prime_t):
         loss = self.weights[0] * self._loss(y_t, y_prime_t)
