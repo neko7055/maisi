@@ -162,7 +162,7 @@ def define_vae_transform(
     if modality == "mri":
         common_transform.append(Lambdad(keys=image_keys, func=lambda x: x[select_channel : select_channel + 1, ...]))
 
-    common_transform.extend(define_fixed_intensity_transform(modality, image_keys=image_keys))
+    # common_transform.extend(define_fixed_intensity_transform(modality, image_keys=image_keys))
 
     if spacing_type == "fixed":
         common_transform.append(

@@ -26,7 +26,7 @@ from .optimizer import Lion, Lookahead
 from .diff_model_setting import load_config, setup_logging
 from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
-from .ssim import MS_SSIM3D
+from .ssim import _ssim_3D
 from .utils import define_instance
 
 # torch.set_float32_matmul_precision('high')
@@ -49,13 +49,35 @@ class MSXSigmoidLoss(torch.nn.Module):
     def __init__(self, weights):
         super().__init__()
         self.weights = weights
+        self.mse_loss = torch.nn.MSELoss()
 
     def forward(self, y_t, y_prime_t):
         loss = self.weights[0] * x_sigmoid_loss(y_t, y_prime_t)
         for w in self.weights[1:]:
             y_t = torch.nn.functional.avg_pool3d(y_t, kernel_size=2, stride=2)
             y_prime_t = torch.nn.functional.avg_pool3d(y_prime_t, kernel_size=2, stride=2)
-            loss += w * x_sigmoid_loss(y_t, y_prime_t)
+            loss += w * self.mse_loss(y_t, y_prime_t)
+        return loss
+
+class Loss(torch.nn.Module):
+    def __init__(self,weights=None, window_size=3):
+        super().__init__()
+        if weights is None:
+            weights = [4/7, 2/7, 1/7]
+        self.weights = weights
+        self.window_size = window_size
+
+    def _loss(self, y_t, y_prime_t):
+        mse_loss = torch.nn.functional.mse_loss(y_t, y_prime_t)
+        loss = (1 - _ssim_3D(y_t, y_prime_t, window_size=self.window_size)) / 2 * 0.8 + x_sigmoid_loss(y_t, y_prime_t) * 0.2
+        return loss + mse_loss
+
+    def forward(self, y_t, y_prime_t):
+        loss = self.weights[0] * self._loss(y_t, y_prime_t)
+        for w in self.weights[1:]:
+            y_t = torch.nn.functional.avg_pool3d(y_t, kernel_size=2, stride=2)
+            y_prime_t = torch.nn.functional.avg_pool3d(y_prime_t, kernel_size=2, stride=2)
+            loss += w * self._loss(y_t, y_prime_t)
         return loss
 
 def augment_modality_label(modality_tensor, prob=0.1):
@@ -243,15 +265,16 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
-    optimizer = Lion(model.parameters(), lr=lr)
+    # optimizer = Lion(model.parameters(), lr=lr)
+    # optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
     optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
-    #optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
     return optimizer
 
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int):
-    return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
-    #return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps//100, eta_min=1e-6)
+    # return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
+    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-7)
 def _call_unet(
         unet: torch.nn.Module,
         x: torch.Tensor,
@@ -354,6 +377,10 @@ def evaluate(
                         bottom_region_index_tensor,
                         modality_tensor,
                     )
+
+                # def dry_run(t, x):
+                #     mu_t, d_mu_t = noise_scheduler.add_noise(src_images, tar_images,torch.Tensor((t,)).repeat(x.shape[0]).to(device,non_blocking=True))
+                #     return d_mu_t
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
 
                 # Logging only on main process (simplified checks)
@@ -509,7 +536,8 @@ def save_checkpoint(
 
 
 def segment_sample_timesteps(self, x_start, a = 0.0, b = 1.0):
-    t = torch.rand((x_start.shape[0],), device=x_start.device)
+    # t = torch.rand((x_start.shape[0],), device=x_start.device)
+    t = torch.zeros((x_start.shape[0],), device=x_start.device)
     t = t * (b - a) + a
     t = t  * self.num_train_timesteps
     return t
@@ -541,7 +569,7 @@ def diff_model_train(
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.sample_timesteps = MethodType(segment_sample_timesteps, noise_scheduler)
     noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
-    noise_scheduler.add_noise = MethodType(partial(enc_dec_interpolate, add_noise=True), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
+    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
@@ -615,7 +643,7 @@ def diff_model_train(
     # Calculate steps based on local dataset size (approximate)
     total_steps = args.diffusion_unet_train["n_epochs"]
     lr_scheduler = create_lr_scheduler(optimizer, total_steps)
-    loss_pt = MSXSigmoidLoss([0.1, 0.2, 0.3, 0.4]).to(accelerator.device)
+    loss_pt = Loss().to(accelerator.device)
 
     # Prepare everything with Accelerate
     # NOTE: We do NOT pass train_loader here because we manually partitioned the dataset
@@ -657,7 +685,7 @@ def diff_model_train(
         if accelerator.is_main_process:
             logger.info(
                 f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s")
-        if (epoch + 1) % 2 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
+        if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1 or epoch == 0:
             start_time = time.perf_counter()
             eval_loss_torch = evaluate(
                 unet,

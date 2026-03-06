@@ -46,8 +46,8 @@ from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 # ═══════════════════════════════════════════════════════════════════════════════
 
 # 後處理反正規化參數（原始碼硬編碼於 run_inference 中）
-INTENSITY_A_MIN = -1000
-INTENSITY_A_MAX = 1000
+INTENSITY_A_MIN = -200
+INTENSITY_A_MAX = 700
 INTENSITY_B_MIN = 0
 INTENSITY_B_MAX = 1
 
@@ -123,6 +123,72 @@ def compile_autoencoder_model(model, shape, device):
             _ = model.decode(example_inputs)
     return model
 
+def expand_first_conv_input_channels(model: torch.nn.Module, k: int):
+    """
+    将模型第一个卷积层 (self.conv) 的 input channel 复制 k 倍。
+    新权重通过重复原始权重 k 次来初始化。
+    """
+    old_conv = model.conv
+    in_channels = old_conv.in_channels * k
+    out_channels = old_conv.out_channels
+
+    # 判断卷积类型（2D 或 3D）
+    if isinstance(old_conv, torch.nn.Conv3d):
+        new_conv = torch.nn.Conv3d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            dilation=old_conv.dilation,
+            groups=old_conv.groups,
+            bias=old_conv.bias is not None,
+            padding_mode=old_conv.padding_mode,
+        )
+    elif isinstance(old_conv, torch.nn.Conv2d):
+        new_conv = torch.nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            dilation=old_conv.dilation,
+            groups=old_conv.groups,
+            bias=old_conv.bias is not None,
+            padding_mode=old_conv.padding_mode,
+        )
+    else:
+        raise TypeError(f"Unsupported conv type: {type(old_conv)}")
+
+    # 将原始权重沿 input channel 维度 (dim=1) 重复 k 次，并除以 k 保持输出尺度一致
+    with torch.no_grad():
+        new_conv.weight.copy_(old_conv.weight.repeat(1, k, *([1] * (old_conv.weight.dim() - 2))) / k)
+        if old_conv.bias is not None:
+            new_conv.bias.copy_(old_conv.bias)
+
+    model.conv = new_conv
+
+
+def load_autoencoder(args: argparse.Namespace, device, logger) -> torch.nn.Module:
+    # Load model to CPU first, let Accelerate handle movement
+
+    autoencoder = define_instance(args, "autoencoder_def").to(device)
+    checkpoint_autoencoder = torch.load(
+        args.trained_autoencoder_path, map_location=device, weights_only=False
+    )
+    if "unet_state_dict" in checkpoint_autoencoder.keys():
+        checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
+    autoencoder.load_state_dict(checkpoint_autoencoder)
+    expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
+    # if args.trained_autoencoder_path.replace(".pt", f"_my.pt") exists, load it instead (for resuming training or using pre-expanded model)
+    my_checkpoint_path = args.trained_autoencoder_path.replace(".pt", f"_my.pt")
+    if os.path.exists(my_checkpoint_path):
+        checkpoint_autoencoder = torch.load(
+            my_checkpoint_path, map_location=device, weights_only=True
+        )
+        logger.info(f"Loading expanded model weights from {my_checkpoint_path}.")
+        autoencoder.load_state_dict(checkpoint_autoencoder)
+    return autoencoder.to(device)
 
 def load_models(
         args: argparse.Namespace,
@@ -139,17 +205,7 @@ def load_models(
       4. 可選 torch.compile 加速推理
     """
     # ── Autoencoder ──
-    autoencoder = define_instance(args, "autoencoder_def").to(device)
-    checkpoint_autoencoder = torch.load(
-        args.trained_autoencoder_path,
-        map_location=device,
-        weights_only=False,
-    )
-    if "unet_state_dict" in checkpoint_autoencoder:
-        checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
-    autoencoder.load_state_dict(checkpoint_autoencoder)
-    autoencoder.eval()
-    logger.info(f"checkpoints {args.trained_autoencoder_path} loaded.")
+    autoencoder = load_autoencoder(args, device, logger)
 
     # ── UNet ──
     unet = define_instance(args, "diffusion_unet_def").to(device)
@@ -453,6 +509,7 @@ def run_inference(
 
         # 修正: 加入 non_blocking=True 搭配 DataLoader 的 pin_memory=True
         src_images = eval_data["src_image"].to(device, non_blocking=True)
+        tar_images = eval_data["tar_image"].to(device, non_blocking=True)
         spacing_tensor = eval_data["spacing"].to(device, non_blocking=True)
 
         # 修正: 移除原始碼中載入但未使用的 tar_images，節省 GPU 記憶體
@@ -504,20 +561,20 @@ def run_inference(
         # Python 的 `and` 運算子對兩個 context manager 求值後只回傳右側，
         # 導致 inference_mode 完全不生效。
         # 修正: 使用逗號分隔，兩者都正確進入 context。
-        with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.float32
-        ):
-            for t, next_t in zip(all_timesteps, all_next_timesteps):
-                mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
-
-            # Un-normalize
-            mu_t = mu_t * (1.0 / tar_scale_factor) + tar_shift_factor
+        # with torch.inference_mode(), torch.autocast(
+        #         device_type=device.type, enabled=True, dtype=torch.float32
+        # ):
+        #     for t, next_t in zip(all_timesteps, all_next_timesteps):
+        #         mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
+        #
+        #     # Un-normalize
+        #     mu_t = mu_t * (1.0 / tar_scale_factor) + tar_shift_factor
 
             # Decode latent → image
         with torch.inference_mode(), torch.autocast(
                 device_type=device.type, enabled=True, dtype=torch.float32
         ):
-            predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
+            predict_images = dynamic_infer(inferer, autoencoder.decode, tar_images)
 
         # ── Post-process on CPU ──
         # 修正: inference_mode 下不需 .detach()，直接 .float().cpu()
@@ -611,7 +668,7 @@ def diff_model_infer(
     autoencoder, unet, src_shift_factor, src_scale_factor, tar_shift_factor, tar_scale_factor = load_models(
         args, device, logger
     )
-    unet = compile_unet_model(unet, logger)
+    # unet = compile_unet_model(unet, logger)
     autoencoder = compile_autoencoder_model(autoencoder, args.diffusion_unet_inference["slide_window_size"], device)
 
     # ── Noise scheduler ──
@@ -638,6 +695,7 @@ def diff_model_infer(
     # 修正: 移除原始碼中載入但未使用的 filenames_test
     filenames_train = load_filenames(args.json_data_list, mode="training")
     filenames_val = load_filenames(args.json_data_list, mode="validation")
+    filenames_test = load_filenames(args.json_data_list, mode="test")
 
     if local_rank == 0:
         logger.info(f"num_files_train: {len(filenames_train)}")
@@ -657,6 +715,13 @@ def diff_model_infer(
         include_body_region,
         include_modality,
     )
+    test_files = prepare_file_list(
+        filenames_test,
+        args.embedding_base_dir,
+        "test",
+        include_body_region,
+        include_modality,
+    )
 
     # ── 分散式資料分割 ──
     if dist.is_initialized():
@@ -668,6 +733,12 @@ def diff_model_infer(
         )[local_rank]
         val_files = partition_dataset(
             data=val_files,
+            shuffle=False,
+            num_partitions=world_size,
+            even_divisible=False,
+        )[local_rank]
+        test_files = partition_dataset(
+            data=test_files,
             shuffle=False,
             num_partitions=world_size,
             even_divisible=False,
@@ -692,6 +763,15 @@ def diff_model_infer(
         include_modality=include_modality,
         modality_mapping=args.modality_mapping,
     )
+    test_loader = prepare_data(
+        test_files,
+        cache_rate=args.diffusion_unet_inference["cache_rate"],
+        num_workers=args.diffusion_unet_inference["num_workers"],
+        batch_size=args.diffusion_unet_inference["batch_size"],
+        include_body_region=include_body_region,
+        include_modality=include_modality,
+        modality_mapping=args.modality_mapping,
+    )
 
     timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
@@ -700,8 +780,8 @@ def diff_model_infer(
     cleanup_interval = 50
 
     try:
-        # 修正: 原始碼 data = run_inference(...) 但函式無回傳值
-        for mode, loader in [("training", train_loader), ("validation", val_loader)]:
+        # 修正: 原始碼 data = run_inference(...) 但函式無回傳值 # ("training", train_loader),
+        for mode, loader in [("validation", val_loader), ("test", test_loader)]:
             save_dir = os.path.join(args.output_dir, timestamp, mode)
             os.makedirs(save_dir, exist_ok=True)
 

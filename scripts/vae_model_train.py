@@ -136,8 +136,52 @@ def prepare_data(
                       pin_memory=True,
                       persistent_workers=use_persistent,)
 
+def expand_first_conv_input_channels(model: torch.nn.Module, k: int):
+    """
+    将模型第一个卷积层 (self.conv) 的 input channel 复制 k 倍。
+    新权重通过重复原始权重 k 次来初始化。
+    """
+    old_conv = model.conv
+    in_channels = old_conv.in_channels * k
+    out_channels = old_conv.out_channels
 
-def load_model(args: argparse.Namespace, accelerator: Accelerator) -> torch.nn.Module:
+    # 判断卷积类型（2D 或 3D）
+    if isinstance(old_conv, torch.nn.Conv3d):
+        new_conv = torch.nn.Conv3d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            dilation=old_conv.dilation,
+            groups=old_conv.groups,
+            bias=old_conv.bias is not None,
+            padding_mode=old_conv.padding_mode,
+        )
+    elif isinstance(old_conv, torch.nn.Conv2d):
+        new_conv = torch.nn.Conv2d(
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=old_conv.kernel_size,
+            stride=old_conv.stride,
+            padding=old_conv.padding,
+            dilation=old_conv.dilation,
+            groups=old_conv.groups,
+            bias=old_conv.bias is not None,
+            padding_mode=old_conv.padding_mode,
+        )
+    else:
+        raise TypeError(f"Unsupported conv type: {type(old_conv)}")
+
+    # 将原始权重沿 input channel 维度 (dim=1) 重复 k 次，并除以 k 保持输出尺度一致
+    with torch.no_grad():
+        new_conv.weight.copy_(old_conv.weight.repeat(1, k, *([1] * (old_conv.weight.dim() - 2))) / k)
+        if old_conv.bias is not None:
+            new_conv.bias.copy_(old_conv.bias)
+
+    model.conv = new_conv
+
+def load_model(args: argparse.Namespace, accelerator: Accelerator, logger) -> torch.nn.Module:
     # Load model to CPU first, let Accelerate handle movement
 
     autoencoder = define_instance(args, "autoencoder_def")
@@ -151,20 +195,72 @@ def load_model(args: argparse.Namespace, accelerator: Accelerator) -> torch.nn.M
     # Optional: Convert BatchNorm to SyncBatchNorm for DDP
     if accelerator.num_processes > 1:
         autoencoder = torch.nn.SyncBatchNorm.convert_sync_batchnorm(autoencoder)
-
+    expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
+    # if args.trained_autoencoder_path.replace(".pt", f"_my.pt") exists, load it instead (for resuming training or using pre-expanded model)
+    my_checkpoint_path = args.trained_autoencoder_path.replace(".pt", f"_my.pt")
+    if os.path.exists(my_checkpoint_path):
+        checkpoint_autoencoder = torch.load(
+            my_checkpoint_path, map_location="cpu", weights_only=True
+        )
+        logger.info(f"Loading expanded model weights from {my_checkpoint_path}.")
+        autoencoder.load_state_dict(checkpoint_autoencoder)
     return autoencoder
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
-    optimizer = Lion(model.parameters(), lr=lr)
+    #optimizer = Lion(model.parameters(), lr=lr)
+    #optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
     optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
-    #optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
     return optimizer
 
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int):
-    return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
-    #return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps//100, eta_min=1e-6)
+    #return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
+    return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-7)
+
+def build_ct_channel_params(A, B, levels=None, ks=None):
+    """预计算所有 (a, b) 参数张量，只需调用一次。"""
+    if ks is None:
+        ks = [5]
+    if levels is None:
+        levels = [1, 3, 5]
+
+    a_list, b_list = [], []
+    for k_val in ks:
+        for l in levels:
+            step = (B - A) / l
+            for i in range(l):
+                s = A + step * i
+                e = s + step
+                a_list.append(k_val / (e - s))
+                b_list.append(-k_val * (e + s) / (2.0 * (e - s)))
+
+    # (N, 1, 1, 1) 用于与 (1, H, W, D) 广播
+    a_t = torch.tensor(a_list, dtype=torch.float64).reshape(-1, 1, 1, 1)
+    b_t = torch.tensor(b_list, dtype=torch.float64).reshape(-1, 1, 1, 1)
+    return a_t, b_t
+
+def apply_ct_channel_extend(x, a_t, b_t):
+    """利用预计算的参数张量，广播计算 sigmoid 扩展通道。"""
+    from monai.data import MetaTensor
+
+    meta = x.meta if isinstance(x, MetaTensor) else None
+
+    # 参数移到与 x 相同的设备
+    device = x.device if isinstance(x, torch.Tensor) else torch.device("cpu")
+    a_t = a_t.to(device=device)
+    b_t = b_t.to(device=device)
+
+    # float64 计算避免溢出，广播: (N,1,1,1) * (1,H,W,D) -> (N,H,W,D)
+    x_64 = x.to(dtype=torch.float64)
+    z = -(a_t * x_64 + b_t)
+    result = torch.sigmoid(z).to(dtype=x.dtype)
+
+    if meta is not None:
+        result = MetaTensor(result, meta=meta)
+
+    return result
 
 def train_one_epoch(
         epoch: int,
@@ -187,7 +283,10 @@ def train_one_epoch(
     loss_torch = torch.zeros(2, dtype=torch.float, device=accelerator.device)
 
     autoencoder.train()
-
+    a_t, b_t = build_ct_channel_params(A=-200, B=700, levels=[1, 3, 5], ks=[4, 5])
+    a_t_for_out, b_t_for_out = build_ct_channel_params(A=0.4, B=0.85, levels=[1, 3, 5], ks=[4, 5])
+    et_channel = lambda x: apply_ct_channel_extend(x, a_t, b_t)
+    et_channel_for_out = lambda x: apply_ct_channel_extend(x, a_t_for_out, b_t_for_out)
     # Iterate over loader
     for train_data in train_loader:
         current_lr = optimizer.param_groups[0]["lr"]
@@ -199,25 +298,43 @@ def train_one_epoch(
 
         src_images = train_data["src_image"].to(device, non_blocking=True).contiguous()
         tar_images = train_data["tar_image"].to(device, non_blocking=True).contiguous()
-
+        src_images = et_channel(src_images)
+        tar_images = et_channel(tar_images)
         with accelerator.accumulate(autoencoder), accelerator.autocast():
             src_reconstruction, src_z_mu, src_z_sigma = autoencoder(src_images)
             tar_reconstruction, tar_z_mu, tar_z_sigma = autoencoder(tar_images)
+
+            # reconstruction loss
+            src_reconstruction = et_channel_for_out(src_reconstruction)
+            tar_reconstruction = et_channel_for_out(tar_reconstruction)
+            src_loss = loss_pt(src_reconstruction.flatten(start_dim=0, end_dim=1),
+                               src_images.flatten(start_dim=0, end_dim=1))
+            tar_loss = loss_pt(tar_reconstruction.flatten(start_dim=0, end_dim=1),
+                               tar_images.flatten(start_dim=0, end_dim=1))
+            recon_loss = (src_loss + tar_loss) / 2
+
+            # KL divergence loss
             z_mu, z_sigma = torch.cat([src_z_mu, tar_z_mu], dim=0), torch.cat([src_z_sigma, tar_z_sigma], dim=0)
             z_mu_mean = z_mu.mean(dim=0, keepdim=True)
             z_var_mean = z_sigma.pow(2).mean(dim=0, keepdim=True) + (z_mu - z_mu_mean).pow(2).mean(dim=0, keepdim=True)
             z_sigma_mean = torch.sqrt(z_var_mean)
             kl = kl_loss(z_mu_mean, z_sigma_mean)
-            src_b, src_c, src_d, src_h, src_w = src_z_mu.shape
-            tar_b, tar_c, tar_d, tar_h, tar_w = tar_z_mu.shape
-            src_z_mu_ = src_z_mu.view(src_b, src_c * src_d * src_h * src_w)
-            tar_z_mu_ = tar_z_mu.view(tar_b, src_c * tar_d * tar_h * tar_w)
-            cat_z_mu_ = torch.cat([src_z_mu_, tar_z_mu_], dim=0)
-            mmd_loss = sliced_energy_loss(cat_z_mu_, num_projections=32768)
-            src_loss = loss_pt(src_reconstruction, src_images)
-            tar_loss = loss_pt(tar_reconstruction, tar_images)
-            recon_loss = (src_loss + tar_loss) / 2
-            loss = recon_loss + 1e-3 * mmd_loss + 1e-7 * kl
+
+            # MMD loss
+            src_eps = torch.randn(128, *src_z_mu.shape, device=src_z_mu.device, dtype=src_z_mu.dtype)
+            src_z_samples = src_z_mu.unsqueeze(0) + src_z_sigma.unsqueeze(0) * src_eps  # (k, B, C, D, H, W)
+            src_z_samples = src_z_samples.reshape(128 * src_z_mu.shape[0], *src_z_mu.shape[1:])  # (k*B, C, D, H, W)
+            tar_eps = torch.randn(128, *tar_z_mu.shape, device=tar_z_mu.device, dtype=tar_z_mu.dtype)
+            tar_z_samples = tar_z_mu.unsqueeze(0) + tar_z_sigma.unsqueeze(0) * tar_eps  # (k, B, C, D, H, W)
+            tar_z_samples = tar_z_samples.reshape(128 * tar_z_mu.shape[0], *tar_z_mu.shape[1:])  # (k*B, C, D, H, W)
+            src_b, src_c, src_d, src_h, src_w = src_z_samples.shape
+            tar_b, tar_c, tar_d, tar_h, tar_w = tar_z_samples.shape
+            src_z_samples = src_z_samples.view(src_b, src_c * src_d * src_h * src_w)
+            tar_z_samples = tar_z_samples.view(tar_b, src_c * tar_d * tar_h * tar_w)
+            cat_z_samples = torch.cat([src_z_samples, tar_z_samples], dim=0)
+            mmd_loss = sliced_energy_loss(cat_z_samples, num_projections=65536)
+
+            loss = recon_loss + mmd_loss + kl
             accelerator.backward(loss)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
@@ -283,7 +400,7 @@ def diff_model_train(
         Path(args.model_dir).mkdir(parents=True, exist_ok=True)
 
     # Load UNet (Move to device logic handled by prepare, but we load first)
-    autoencoder = load_model(args, accelerator)
+    autoencoder = load_model(args, accelerator, logger)
 
     filenames_train = load_filenames(args.json_data_list, mode="training")
     filenames_val = load_filenames(args.json_data_list, mode="validation")
