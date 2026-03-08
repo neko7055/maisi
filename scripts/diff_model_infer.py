@@ -738,16 +738,25 @@ def diff_model_infer(
         modality_mapping=args.modality_mapping,
     )
 
-    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    if dist.is_available() and dist.is_initialized():
+        obj_list = [None]
+        if local_rank == 0:
+            obj_list[0] = datetime.now().strftime("%Y%m%d%H%M%S")
+        dist.broadcast_object_list(obj_list, src=0)
+        timestamp = obj_list[0]
+        dist.barrier()
+    else:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
     # ── 非同步 I/O 執行緒池 ──
     io_executor = ProcessPoolExecutor(max_workers=8)
     cleanup_interval = 50
+    save_dir_base = os.path.join(args.output_dir, timestamp)
 
     try:
         # 修正: 原始碼 data = run_inference(...) 但函式無回傳值 # ("training", train_loader),
         for mode, loader in [("validation", val_loader), ("test", test_loader), ("training", train_loader)]:
-            save_dir = os.path.join(args.output_dir, timestamp, mode)
+            save_dir = os.path.join(save_dir_base, mode)
             os.makedirs(save_dir, exist_ok=True)
 
             inferer = SlidingWindowInferer(
