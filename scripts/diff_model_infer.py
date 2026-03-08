@@ -90,22 +90,6 @@ def _load_json_field(file_path: str, key: str, convert_to_float: bool = True):
 # 模型載入
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def compile_unet_model(model, logger):
-    compile_module_list = ["conv_in", "down_blocks", "middle_block", "up_blocks", "out"]
-    for module_name in compile_module_list:
-        module = getattr(model, module_name, None)
-        if module is not None:
-            # 統一使用 .compile() 進行就地編譯，不分 Module 或 ModuleList
-            module.compile(
-                mode="max-autotune",
-                fullgraph=False,
-                dynamic=False,
-                backend="inductor",
-            )
-            logger.info(f"Compiled {module_name} with max-autotune.")
-
-    return model
-
 def compile_autoencoder_model(model, shape, device):
     """
     編譯 autoencoder 的 encode 方法，使用 torch.compile 而非私有 API。
@@ -196,18 +180,18 @@ def load_models(
         logger: logging.Logger,
 ) -> tuple:
     """
-    載入 autoencoder 與 UNet 模型。
+    ▒~I▒~E▒ autoencoder ▒~H~G UNet 模▒~^~K▒~@~B
 
     修正:
-      1. autoencoder 的 torch.load 加入 map_location（原始碼缺少）
-      2. 加入 weights_only=False（明確指定，避免未來版本警告）
-      3. 載入後立即 eval()（原始碼延遲到 run_inference 才設定）
-      4. 可選 torch.compile 加速推理
+      1. autoencoder ▒~Z~D torch.load ▒~J| ▒~E▒ map_location▒~H▒~N~_▒~K碼缺▒~Q▒~I
+      2. ▒~J| ▒~E▒ weights_only=False▒~H▒~X~N確▒~L~G▒~Z▒~L▒~A▒▒~E~M▒~\▒▒~F▒~I~H▒~\▒警▒~Q~J▒~I
+      3. ▒~I▒~E▒▒~L▒~K▒~M▒ eval()▒~H▒~N~_▒~K碼延▒~A▒▒~H▒ run_inference ▒~I~M設▒~Z▒~I
+      4. ▒~O▒▒~A▒ torch.compile ▒~J| ▒~@~_▒~N▒▒~P~F
     """
-    # ── Autoencoder ──
+    # ▒~T~@▒~T~@ Autoencoder ▒~T~@▒~T~@
     autoencoder = load_autoencoder(args, device, logger)
 
-    # ── UNet ──
+    # ▒~T~@▒~T~@ UNet ▒~T~@▒~T~@
     unet = define_instance(args, "diffusion_unet_def").to(device)
     checkpoint = torch.load(
         f"{args.model_dir}/{args.model_filename}",
@@ -218,17 +202,13 @@ def load_models(
     unet.eval()
     logger.info(f"checkpoints {args.model_dir}/{args.model_filename} loaded.")
 
-    src_shift_factor = checkpoint["src_shift_factor"]
-    src_scale_factor = checkpoint["src_scale_factor"]
-    tar_shift_factor = checkpoint["tar_shift_factor"]
-    tar_scale_factor = checkpoint["tar_scale_factor"]
+    shift_factor = checkpoint["shift_factor"]
+    scale_factor = checkpoint["scale_factor"]
 
-    logger.info(f"src_shift_factor -> {src_shift_factor}.")
-    logger.info(f"src_scale_factor -> {src_scale_factor}.")
-    logger.info(f"tar_shift_factor -> {tar_shift_factor}.")
-    logger.info(f"tar_scale_factor -> {tar_scale_factor}.")
+    logger.info(f"shift_factor -> {shift_factor}.")
+    logger.info(f"scale_factor -> {scale_factor}.")
 
-    return autoencoder, unet, src_shift_factor, src_scale_factor, tar_shift_factor, tar_scale_factor
+    return autoencoder, unet, shift_factor, scale_factor
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -466,10 +446,8 @@ def run_inference(
         unet: torch.nn.Module,
         autoencoder: torch.nn.Module,
         data_loader: DataLoader,
-        src_shift_factor: torch.Tensor,
-        src_scale_factor: torch.Tensor,
-        tar_shift_factor: torch.Tensor,
-        tar_scale_factor: torch.Tensor,
+        shift_factor: torch.Tensor,
+        scale_factor: torch.Tensor,
         noise_scheduler: RFlowScheduler,
         inferer: SlidingWindowInferer,
         logger: logging.Logger,
@@ -515,8 +493,6 @@ def run_inference(
         # 修正: 移除原始碼中載入但未使用的 tar_images，節省 GPU 記憶體
         # 原始碼: tar_images = eval_data["tar_image"].to(device)
 
-        # Normalize
-        src_images = (src_images - src_shift_factor) * src_scale_factor
 
         top_region_index_tensor = None
         bottom_region_index_tensor = None
@@ -546,7 +522,7 @@ def run_inference(
         def model_wrapper(t, x):
             return _call_unet(
                 unet,
-                x,
+                (x-shift_factor)*scale_factor,
                 t,
                 spacing_tensor,
                 include_body_region,
@@ -556,25 +532,17 @@ def run_inference(
                 modality_tensor,
             )
 
-        # ══ 修正致命錯誤 ══
-        # 原始碼: with torch.inference_mode() and torch.autocast(...)
-        # Python 的 `and` 運算子對兩個 context manager 求值後只回傳右側，
-        # 導致 inference_mode 完全不生效。
-        # 修正: 使用逗號分隔，兩者都正確進入 context。
-        # with torch.inference_mode(), torch.autocast(
-        #         device_type=device.type, enabled=True, dtype=torch.float32
-        # ):
-        #     for t, next_t in zip(all_timesteps, all_next_timesteps):
-        #         mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
-        #
-        #     # Un-normalize
-        #     mu_t = mu_t * (1.0 / tar_scale_factor) + tar_shift_factor
-
-            # Decode latent → image
         with torch.inference_mode(), torch.autocast(
                 device_type=device.type, enabled=True, dtype=torch.float32
         ):
-            predict_images = dynamic_infer(inferer, autoencoder.decode, tar_images)
+            for t, next_t in zip(all_timesteps, all_next_timesteps):
+                mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
+
+            # Decode latent ▒~F~R image
+        with torch.inference_mode(), torch.autocast(
+                device_type=device.type, enabled=True, dtype=torch.float32
+        ):
+            predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
 
         # ── Post-process on CPU ──
         # 修正: inference_mode 下不需 .detach()，直接 .float().cpu()
@@ -665,20 +633,17 @@ def diff_model_infer(
     )
 
     # ── 載入模型 ──
-    autoencoder, unet, src_shift_factor, src_scale_factor, tar_shift_factor, tar_scale_factor = load_models(
+    autoencoder, unet, shift_factor, scale_factor = load_models(
         args, device, logger
     )
-    # unet = compile_unet_model(unet, logger)
     autoencoder = compile_autoencoder_model(autoencoder, args.diffusion_unet_inference["slide_window_size"], device)
 
     # ── Noise scheduler ──
-    args.noise_scheduler["use_timestep_transform"] = False
-    args.noise_scheduler["scale"] = 1.0
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
+    noise_scheduler.step = MethodType(rk5_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
-        input_img_size_numel=torch.prod(torch.tensor(src_scale_factor.shape[2:])),
+        input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
     )
 
     # ── 條件輸入判斷 ──
@@ -781,7 +746,7 @@ def diff_model_infer(
 
     try:
         # 修正: 原始碼 data = run_inference(...) 但函式無回傳值 # ("training", train_loader),
-        for mode, loader in [("validation", val_loader), ("test", test_loader)]:
+        for mode, loader in [("validation", val_loader), ("test", test_loader), ("training", train_loader)]:
             save_dir = os.path.join(args.output_dir, timestamp, mode)
             os.makedirs(save_dir, exist_ok=True)
 
@@ -801,10 +766,8 @@ def diff_model_infer(
                 unet=unet,
                 autoencoder=autoencoder,
                 data_loader=loader,
-                src_shift_factor=src_shift_factor,
-                src_scale_factor=src_scale_factor,
-                tar_shift_factor=tar_shift_factor,
-                tar_scale_factor=tar_scale_factor,
+                shift_factor=shift_factor,
+                scale_factor=scale_factor,
                 noise_scheduler=noise_scheduler,
                 inferer=inferer,
                 logger=logger,
