@@ -39,9 +39,6 @@ from .utils import define_instance, dynamic_infer
 # torch.backends.cudnn.deterministic = False
 
 def compile_model(model, shape, device):
-    """
-    編譯 autoencoder 的 encode 方法，使用 torch.compile 而非私有 API。
-    """
     model = torch.compile(
         model,
         mode="max-autotune",
@@ -64,7 +61,6 @@ def expand_first_conv_input_channels(model: torch.nn.Module, k: int):
     in_channels = old_conv.in_channels * k
     out_channels = old_conv.out_channels
 
-    # 判断卷积类型（2D 或 3D）
     if isinstance(old_conv, torch.nn.Conv3d):
         new_conv = torch.nn.Conv3d(
             in_channels=in_channels,
@@ -120,10 +116,6 @@ def load_model(args: argparse.Namespace, device, logger) -> torch.nn.Module:
         autoencoder.load_state_dict(checkpoint_autoencoder)
     return autoencoder.to(device)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Transform 建立
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def create_data_transforms(data_type,
                            data_base_dir,
                            embedding_base_dir,
@@ -144,23 +136,13 @@ def create_data_transforms(data_type,
     #     intensity_transforms = []
 
     def _build_out_path(filename_str: str):
-        """純字串操作：將原始檔名轉為 embedding 輸出路徑。"""
         out_base = filename_str.replace(".gz", "").replace(".nii", "")
         return os.path.join(embedding_base_dir, data_type, out_base + "_emb.nii.gz")
 
     def _build_full_path(filename_str: str):
-        """純字串操作：將相對路徑拼接為完整的檔案路徑。"""
         return os.path.join(data_base_dir, data_type, filename_str)
 
     def _load_nifti(filepath: str):
-        """
-        用 nibabel 載入 NIfTI，回傳純 torch.Tensor（CPU, float32）。
-        自動處理 channel dimension：
-          - (X, Y, Z)    → (1, X, Y, Z)
-          - (X, Y, Z, C) → (C, X, Y, Z)
-        輸出已為 RAS 方向（nibabel 預設以 header 中的方向載入，
-        若需強制 RAS，使用 nibabel.as_closest_canonical）。
-        """
         img = nib.load(filepath)
         # 強制轉為 RAS（closest canonical）
         img = nib.as_closest_canonical(img)
@@ -168,21 +150,12 @@ def create_data_transforms(data_type,
 
 
     def _read_affine(img) -> np.ndarray:
-        """用 nibabel 直接從 NIfTI 檔案讀取 affine matrix，不使用 MetaTensor。"""
         try:
             return img.affine.astype(np.float64)
         except Exception as e:
             return np.eye(4).astype(np.float64)
 
     def _nifti_as_tensor(img)-> torch.Tensor:
-        """
-        用 nibabel 載入 NIfTI，回傳純 torch.Tensor（CPU, float32）。
-        自動處理 channel dimension：
-          - (X, Y, Z)    → (1, X, Y, Z)
-          - (X, Y, Z, C) → (C, X, Y, Z)
-        輸出已為 RAS 方向（nibabel 預設以 header 中的方向載入，
-        若需強制 RAS，使用 nibabel.as_closest_canonical）。
-        """
         data = img.get_fdata(caching='unchanged', dtype=np.float32)
         if data.ndim == 3:
             # (X, Y, Z) → (1, X, Y, Z)
@@ -228,22 +201,12 @@ def create_data_transforms(data_type,
 
     return Compose(base_transforms)
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 檔案清單建構
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def build_file_list(
         json_data: dict,
         data_type: str,
         embedding_base_dir: str,
         logger: logging.Logger,
 ) -> tuple[list[dict], int]:
-    """
-    構建檔案列表，預先過濾已存在的 embedding，避免無效 I/O。
-
-    Returns:
-        (file_list, skipped_count)
-    """
     files_raw = json_data[data_type]
     file_list = []
     skipped = 0
@@ -273,10 +236,6 @@ def build_file_list(
 
     return file_list, skipped
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# DataLoader 建立（參考 diff_model_infer.py 的 prepare_data）
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def prepare_data(
         file_list: list[dict],
         transforms: Compose,
@@ -284,32 +243,6 @@ def prepare_data(
         num_workers: int = 2,
         batch_size: int = 1,
 ) -> DataLoader:
-    """
-    使用 CacheDataset + DataLoader 載入與前處理資料。
-
-    參考 diff_model_infer.py 和 diff_model_train_with_accelerate.py 的做法：
-      - CacheDataset 快取前處理結果，避免重複的 LoadImage + Orientation 計算
-      - DataLoader 的 pin_memory=True 加速 CPU→GPU 傳輸
-      - persistent_workers=True 避免每個 epoch 重啟 worker
-
-    與原始碼差異：
-      - 原始碼逐一 item 呼叫 data_transforms()，無法利用多 worker 平行載入
-      - 現在使用 CacheDataset 快取 + DataLoader 多 worker 預取
-
-    注意：
-      - batch_size=1 是因為醫學影像尺寸可能不一致（無法 stack）
-      - 若確定所有影像尺寸一致，可增大 batch_size
-
-    Args:
-        file_list: 包含檔案路徑的 dict 列表。
-        transforms: 預建立的 Compose transforms。
-        cache_rate: CacheDataset 快取比率（0.0~1.0）。
-        num_workers: DataLoader worker 數量。
-        batch_size: 每批次資料量。
-
-    Returns:
-        DataLoader 實例。
-    """
     dataset = CacheDataset(
         data=file_list,
         transform=transforms,
@@ -335,10 +268,6 @@ def img_save(out_nda, out_path, out_affine, logger):
         logger.info(f"Saved {out_path}.")
     except Exception as e:
         logger.error(f"Error saving {out_path}: {e}")
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 批次處理（DataLoader batch → encode + save）
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def build_ct_channel_params(A, B, levels=None, ks=None):
     """预计算所有 (a, b) 参数张量，只需调用一次。"""
@@ -373,7 +302,6 @@ def apply_ct_channel_extend(x, a_t, b_t):
     a_t = a_t.to(device=device)
     b_t = b_t.to(device=device)
 
-    # float64 计算避免溢出，广播: (N,1,1,1) * (1,H,W,D) -> (N,H,W,D)
     x_64 = x.to(dtype=torch.float64)
     z = -(a_t * x_64 + b_t)
     result = torch.sigmoid(z).to(dtype=x.dtype)
@@ -411,12 +339,6 @@ def process_batch(
         all_futures.extend(futures)
     return all_futures
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 主入口
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 @torch.inference_mode()
 def diff_model_create_training_data(
         env_config_path: str,
@@ -424,20 +346,6 @@ def diff_model_create_training_data(
         model_def_path: str,
         num_gpus: int,
 ) -> None:
-    """
-    Create training data for the diffusion model.
-
-    重構重點（相對於原始碼）：
-      1. CacheDataset + DataLoader：參考 diff_model_infer.py 和
-         diff_model_train_with_accelerate.py，使用 CacheDataset 快取前處理結果、
-         DataLoader 多 worker 平行預取，取代逐一 item 的序列處理。
-      2. 統一 modality transform：所有資料共用同一個 modality 的 transform pipeline，
-         只建立一次 Compose，供 CacheDataset 使用。
-      3. 保留原有優化：預過濾已存在 embedding、非同步 I/O、partition_dataset、
-         定期 CUDA cache 清理。
-      4. pin_memory + non_blocking：加速 CPU→GPU 資料傳輸。
-      5. persistent_workers：避免每輪重啟 worker 進程。
-    """
     # ── Load config ──
     args = load_config(env_config_path, model_config_path, model_def_path)
     if "autoencoder_tp_num_splits" in args.transform_to_laten.keys():

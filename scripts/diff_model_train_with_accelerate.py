@@ -21,6 +21,7 @@ from accelerate import Accelerator  # Import Accelerate
 from monai.data import DataLoader, partition_dataset
 from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
+from focal_frequency_loss import FocalFrequencyLoss as FFL
 
 from .optimizer import Lion, Lookahead
 from .diff_model_setting import load_config, setup_logging
@@ -28,6 +29,7 @@ from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_in
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 from .ssim import _ssim_3D
 from .utils import define_instance
+
 
 # torch.set_float32_matmul_precision('high')
 # torch.backends.cudnn.allow_tf32 = True
@@ -38,6 +40,7 @@ def x_sigmoid_loss(y_t, y_prime_t):
     ey_t = y_t - y_prime_t
     return torch.mean(ey_t * torch.tanh(ey_t / 2))
 
+
 class XSigmoidLoss(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -45,11 +48,12 @@ class XSigmoidLoss(torch.nn.Module):
     def forward(self, y_t, y_prime_t):
         return x_sigmoid_loss(y_t, y_prime_t)
 
+
 class MSXSigmoidLoss(torch.nn.Module):
     def __init__(self, weights=None):
         super().__init__()
         if weights is None:
-            weights = [4/7, 2/7, 1/7]
+            weights = [4 / 7, 2 / 7, 1 / 7]
         self.weights = weights
 
     def forward(self, y_t, y_prime_t):
@@ -60,54 +64,52 @@ class MSXSigmoidLoss(torch.nn.Module):
             loss += w * x_sigmoid_loss(y_t, y_prime_t)
         return loss
 
-def laplacian_smoothness_loss(V):
-    lap = V[:,:,1:-1,1:-1] * -4 \
-    + V[:,:,2:,1:-1] \
-    + V[:,:,:-2,1:-1] \
-    + V[:,:,1:-1,2:] \
-    + V[:,:,1:-1,:-2]
 
-    loss = (lap**2).mean()
-    return loss
-
-def spectral_loss(V, V_gt):
-    Vf = torch.fft.rfftn(V, dim=(-3, -2, -1), norm="ortho")
-    Vgtf = torch.fft.rfftn(V_gt, dim=(-3, -2, -1), norm="ortho")
-    pred_real_imag = torch.cat([Vf.real, Vf.imag], dim=1)
-    target_real_imag = torch.cat([Vgtf.real, Vgtf.imag], dim=1)
-    loss = torch.nn.functional.l1_loss(pred_real_imag, target_real_imag)
-    return loss
-
-class Loss(torch.nn.Module):
-    def __init__(self,weights=None, window_size=3):
+class MSSSIM(torch.nn.Module):
+    def __init__(self, weights=None):
         super().__init__()
         if weights is None:
-            weights = [4/7, 2/7, 1/7]
+            weights = [4 / 7, 2 / 7, 1 / 7]
         self.weights = weights
-        self.window_size = window_size
-
-    def _loss(self, y_t, y_prime_t):
-        spec_loss = spectral_loss(y_t, y_prime_t)
-        mse_loss = torch.nn.functional.mse_loss(y_t, y_prime_t)
-        loss = (1 - _ssim_3D(y_t, y_prime_t, window_size=self.window_size)) / 2 * 0.8 + x_sigmoid_loss(y_t, y_prime_t) * 0.2
-        return loss + mse_loss + spec_loss
 
     def forward(self, y_t, y_prime_t):
-        #lap_loss = laplacian_smoothness_loss(y_t)
-        #spec_loss = spectral_loss(y_t, y_prime_t)
-        l1_loss = torch.nn.functional.l1_loss(y_t, y_prime_t)
-        y_t_f = torch.flatten(y_t, start_dim=1)
-        y_prime_t_f = torch.flatten(y_prime_t, start_dim=1)
-        cos_loss = (1 - torch.nn.functional.cosine_similarity(y_t_f, y_prime_t_f, dim=1)).mean()
-        #norm_y_t_f = torch.norm(y_t_f, dim=1)
-        #norm_y_prime_t_f = torch.norm(y_prime_t_f, dim=1)
-        #mag_loss = ((norm_y_t_f - norm_y_prime_t_f) ** 2).mean()
-        loss = self.weights[0] * self._loss(y_t, y_prime_t)
+        loss = self.weights[0] * (1 - _ssim_3D(y_t, y_prime_t, 3)) / 2
         for w in self.weights[1:]:
             y_t = torch.nn.functional.avg_pool3d(y_t, kernel_size=2, stride=2)
             y_prime_t = torch.nn.functional.avg_pool3d(y_prime_t, kernel_size=2, stride=2)
-            loss += w * self._loss(y_t, y_prime_t)
-        return loss + l1_loss + cos_loss
+            loss += w * (1 - _ssim_3D(y_t, y_prime_t, 3)) / 2
+        return loss
+
+
+def ffl_loss_3d(pred, target):
+    ffl_loss_fn = FFL(loss_weight=1.0, alpha=1.0)
+    B, C, H, W, D = pred.shape
+    pred = pred.permute(0, 4, 1, 2, 3)
+    target = target.permute(0, 4, 1, 2, 3)
+
+    pred_2d = pred.reshape(-1, C, H, W)
+    target_2d = target.reshape(-1, C, H, W)
+
+    loss = ffl_loss_fn(pred_2d, target_2d)
+    return loss
+
+
+class SpectralL1Loss(torch.nn.Module):
+    def __init__(self, dim=3):
+        super().__init__()
+        self.fft_dims = (-2, -1) if dim == 2 else (-3, -2, -1)
+
+    def forward(self, pred, target):
+        pred_fft = torch.fft.rfftn(pred, dim=self.fft_dims, norm="ortho")
+        target_fft = torch.fft.rfftn(target, dim=self.fft_dims, norm="ortho")
+
+        loss_real = torch.nn.functional.l1_loss(pred_fft.real, target_fft.real)
+        loss_imag = torch.nn.functional.l1_loss(pred_fft.imag, target_fft.imag)
+
+        loss_spectral = loss_real + loss_imag
+
+        return loss_spectral
+
 
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
@@ -123,6 +125,7 @@ def augment_modality_label(modality_tensor, prob=0.1):
     modality_tensor = modality_tensor * mask_zero.long()
 
     return modality_tensor
+
 
 def prepare_file_list(filenames, embedding_base_dir, mode, include_body_region, include_modality):
     # Prepare file list
@@ -164,7 +167,6 @@ def prepare_data(
         include_modality: bool = True,
         modality_mapping: dict = None
 ) -> DataLoader:
-
     def _load_data_from_file(file_path, key, convert_to_float=True):
         with open(file_path) as f:
             if convert_to_float:
@@ -207,7 +209,7 @@ def prepare_data(
                       batch_size=batch_size,
                       shuffle=True,
                       pin_memory=True,
-                      persistent_workers=use_persistent,)
+                      persistent_workers=use_persistent, )
 
 
 def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: logging.Logger) -> torch.nn.Module:
@@ -233,16 +235,17 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     torch.Tensor, torch.Tensor]:
     def _calculate(tensor_list):
         if len(tensor_list) > 0:
-            all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64) # [B, C, D, H, W]
+            all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64)  # [B, C, D, H, W]
             mean = torch.mean(all_data, dim=0, keepdim=True)
             std = torch.std(all_data, dim=0, keepdim=True, correction=0)
-            shift_factor = mean # median_data
-            scale_factor = 1 / std # mad
+            shift_factor = mean  # median_data
+            scale_factor = 1 / std  # mad
         else:
             # Fallback if a process has no data (unlikely with proper partition)
             scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
             shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
         return shift_factor, scale_factor
+
     # (Calculates scale factor locally then syncs across processes)
     data_transforms_list = [
         monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
@@ -255,7 +258,7 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     # Only process local files
     for d in train_files:
         d_transformed = data_transforms(d)
-        tensor_list.append(d_transformed["tar_image"]-d_transformed["src_image"])
+        tensor_list.append(d_transformed["tar_image"] - d_transformed["src_image"])
 
     shift_factor, scale_factor = _calculate(tensor_list)
 
@@ -289,6 +292,7 @@ def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int):
     # return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-7)
     return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
 
+
 def _call_unet(
         unet: torch.nn.Module,
         x: torch.Tensor,
@@ -311,6 +315,7 @@ def _call_unet(
     if include_modality:
         unet_inputs["class_labels"] = modality_tensor
     return unet(**unet_inputs)
+
 
 def evaluate(
         unet: torch.nn.Module,
@@ -364,7 +369,8 @@ def evaluate(
 
         all_timesteps = noise_scheduler.timesteps
         all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
-        all_timesteps, all_next_timesteps = torch.flip(all_next_timesteps, dims=[-1]), torch.flip(all_timesteps,dims=[-1])
+        all_timesteps, all_next_timesteps = torch.flip(all_next_timesteps, dims=[-1]), torch.flip(all_timesteps,
+                                                                                                  dims=[-1])
         mu_t_tf = src_images
         mu_t = src_images
         with torch.inference_mode():
@@ -379,8 +385,11 @@ def evaluate(
                                       top_region_index_tensor,
                                       bottom_region_index_tensor,
                                       modality_tensor) * scale_factor + shift_factor
+
                 def dry_run(t, x):
-                    mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, torch.Tensor((t,)).repeat(x.shape[0]).to(device, non_blocking=True))
+                    mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images,
+                                                                   torch.Tensor((t,)).repeat(x.shape[0]).to(device,
+                                                                                                            non_blocking=True))
                     return mu_t_gt, d_mu_t_gt
 
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
@@ -421,7 +430,13 @@ def train_one_epoch(
         gradient_accumulation_steps: int
 ) -> torch.Tensor:
     # Handle DDP wrapping access
-
+    spec_loss = SpectralL1Loss().to(accelerator.device)
+    ms_ssim = MSSSIM().to(accelerator.device)
+    l1_loss = torch.nn.L1Loss().to(accelerator.device)
+    loss_pos_f = lambda y,y_gt: 0.8 * ms_ssim(y,y_gt) + \
+                                0.2 * l1_loss(y,y_gt) + \
+                                0.01 * spec_loss(y,y_gt) + \
+                                0.01 * ffl_loss_3d(y,y_gt)
     if accelerator.is_main_process:
         current_lr = optimizer.param_groups[0]["lr"]
         logger.info(f"Epoch {epoch + 1}, lr {current_lr}.")
@@ -461,11 +476,12 @@ def train_one_epoch(
             )
 
         # Logic remains same
-        assert isinstance(noise_scheduler,RFlowScheduler)
+        assert isinstance(noise_scheduler, RFlowScheduler)
 
         timesteps = [noise_scheduler.sample_timesteps(src_images) for _ in range(time_batch_size)]
-        timesteps = torch.stack(timesteps, dim=1)
-        timesteps, _ = torch.sort(timesteps, dim=1)
+        if timesteps:
+            timesteps = torch.stack(timesteps, dim=1)
+            timesteps, _ = torch.sort(timesteps, dim=1)
 
         with accelerator.accumulate(unet), accelerator.autocast():
             timestep = torch.zeros((src_images.shape[0],), device=device)
@@ -498,7 +514,7 @@ def train_one_epoch(
                 #                     modality_tensor) * scale_factor + shift_factor
 
                 mu_t = mu_t + dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps * d_mu_t
-                loss_pos = loss_pt(mu_t, mu_t_gt)
+                loss_pos = loss_pos_f(mu_t, mu_t_gt)
                 d_mu_t = _call_unet(unet,
                                     mu_t,
                                     timestep,
@@ -518,7 +534,7 @@ def train_one_epoch(
                                        top_region_index_tensor,
                                        bottom_region_index_tensor,
                                        modality_tensor) * scale_factor + shift_factor
-                loss_v = (loss_pt(d_mu_t, d_mu_t_gt + res) + loss_pt(d_mu_t_tf, d_mu_t_gt) + loss_pt(d_mu_t, d_mu_t_tf)) / 3
+                loss_v = (loss_pt(d_mu_t, d_mu_t_gt + res) + loss_pt(d_mu_t_tf, d_mu_t_gt) + loss_pt(d_mu_t,d_mu_t_tf)) / 3
 
                 loss = loss + (loss_v + loss_pos) / time_batch_size
 
@@ -538,7 +554,7 @@ def train_one_epoch(
             #                     bottom_region_index_tensor,
             #                     modality_tensor) * scale_factor + shift_factor
             mu_t = mu_t + dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps * d_mu_t
-            loss = loss + loss_pt(mu_t, mu_t_gt)
+            loss = loss + loss_pos_f(mu_t, mu_t_gt)
 
             accelerator.backward(loss)
             optimizer.step()
@@ -594,6 +610,7 @@ def save_checkpoint(
             f"{ckpt_folder}/{args.model_filename}",
         )
 
+
 def diff_model_train(
         env_config_path: str, model_config_path: str, model_def_path: str
 ) -> None:
@@ -604,7 +621,7 @@ def diff_model_train(
     accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"],
                               step_scheduler_with_optimizer=False)
 
-    logger = setup_logging("training", rk_filter=False)
+    logger = setup_logging("training", rk_filter=True)
 
     # Log device info
     logger.info(f"Process {accelerator.process_index} using device: {accelerator.device}")
@@ -616,8 +633,10 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(euler_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
-    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False), noise_scheduler) # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
+    noise_scheduler.step = MethodType(euler_step,
+                                      noise_scheduler)  # Option: euler_step, midpoint_step, rk4_step, rk5_step
+    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False),
+                                           noise_scheduler)  # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
@@ -751,7 +770,8 @@ def diff_model_train(
             formatted = ", ".join(f"{x:.8f}" for x in eval_loss_torch)
 
             if accelerator.is_main_process:
-                logger.info(f"epoch {epoch + 1} average mse loss on validation set: {formatted}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
+                logger.info(
+                    f"epoch {epoch + 1} average mse loss on validation set: {formatted}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
 
         save_checkpoint(
             epoch,

@@ -16,6 +16,7 @@ dependencies = [
   "torchmetrics",
   "transformers[torch]",
   "monai[all]",
+  "focal-frequency-loss"
 ]
 
 [[tool.uv.index]]
