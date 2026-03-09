@@ -284,9 +284,7 @@ def train_one_epoch(
 
     autoencoder.train()
     a_t, b_t = build_ct_channel_params(A=-200, B=700, levels=[1, 3, 5], ks=[4, 5])
-    a_t_for_out, b_t_for_out = build_ct_channel_params(A=0.4, B=0.85, levels=[1, 3, 5], ks=[4, 5])
     et_channel = lambda x: apply_ct_channel_extend(x, a_t, b_t)
-    et_channel_for_out = lambda x: apply_ct_channel_extend(x, a_t_for_out, b_t_for_out)
     # Iterate over loader
     for train_data in train_loader:
         current_lr = optimizer.param_groups[0]["lr"]
@@ -304,9 +302,13 @@ def train_one_epoch(
             src_reconstruction, src_z_mu, src_z_sigma = autoencoder(src_images)
             tar_reconstruction, tar_z_mu, tar_z_sigma = autoencoder(tar_images)
 
+            src_reconstruction = src_reconstruction * 2000 - 1000
+            tar_reconstruction = tar_reconstruction * 2000 - 1000
+
             # reconstruction loss
-            src_reconstruction = et_channel_for_out(src_reconstruction)
-            tar_reconstruction = et_channel_for_out(tar_reconstruction)
+            src_reconstruction = et_channel(src_reconstruction)
+            tar_reconstruction = et_channel(tar_reconstruction)
+
             src_loss = loss_pt(src_reconstruction.flatten(start_dim=0, end_dim=1),
                                src_images.flatten(start_dim=0, end_dim=1))
             tar_loss = loss_pt(tar_reconstruction.flatten(start_dim=0, end_dim=1),
