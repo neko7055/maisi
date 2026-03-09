@@ -535,8 +535,7 @@ def train_one_epoch(
                                        top_region_index_tensor,
                                        bottom_region_index_tensor,
                                        modality_tensor)
-                loss_v = (loss_pt(d_mu_t, d_mu_t_gt + res) + loss_pt(d_mu_t_tf, d_mu_t_gt) + loss_pt(d_mu_t,
-                                                                                                     d_mu_t_tf)) / 2
+                loss_v = (loss_pt(d_mu_t, d_mu_t_gt + res) + loss_pt(d_mu_t_tf, d_mu_t_gt) + loss_pt(d_mu_t, d_mu_t_tf)) / 3
 
                 loss = loss + (loss_v + loss_pos) / time_batch_size
 
@@ -619,8 +618,7 @@ def diff_model_train(
     # mixed_precision can be "no", "fp16", "bf16".
     # It is recommended to configure this via `accelerate config` CLI or pass arg here.
     args = load_config(env_config_path, model_config_path, model_def_path)
-    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"] * \
-                                                          args.diffusion_unet_train["time_batch_size"],
+    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"],
                               step_scheduler_with_optimizer=False)
 
     logger = setup_logging("training", rk_filter=False)
