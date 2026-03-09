@@ -41,54 +41,23 @@ from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# 常數
-# ═══════════════════════════════════════════════════════════════════════════════
-
-# 後處理反正規化參數（原始碼硬編碼於 run_inference 中）
 INTENSITY_A_MIN = -200
 INTENSITY_A_MAX = 700
 INTENSITY_B_MIN = 0
 INTENSITY_B_MAX = 1
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 工具函式
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 def set_random_seed(seed: Optional[int]) -> int:
-    """
-    設定隨機種子以確保可重現性。
-
-    Args:
-        seed: 隨機種子，若為 None 則自動產生。
-
-    Returns:
-        實際使用的隨機種子。
-    """
     random_seed = random.randint(0, 99999) if seed is None else seed
     set_determinism(random_seed)
     return random_seed
 
 
 def _load_json_field(file_path: str, key: str, convert_to_float: bool = True):
-    """
-    從 JSON 檔案載入指定欄位。
-
-    問題: 原始碼將此函式定義在 prepare_data 內部，每次呼叫 prepare_data 時重建。
-    解法: 抽為模組層級函式，避免重複定義。
-    """
     with open(file_path, "r") as f:
         data = json.load(f)
     if convert_to_float:
         return torch.FloatTensor(data[key])
     return data[key]
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 模型載入
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def compile_autoencoder_model(model, shape, device):
     """
@@ -164,7 +133,6 @@ def load_autoencoder(args: argparse.Namespace, device, logger) -> torch.nn.Modul
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
-    # if args.trained_autoencoder_path.replace(".pt", f"_my.pt") exists, load it instead (for resuming training or using pre-expanded model)
     my_checkpoint_path = args.trained_autoencoder_path.replace(".pt", f"_my.pt")
     if os.path.exists(my_checkpoint_path):
         checkpoint_autoencoder = torch.load(
@@ -179,19 +147,8 @@ def load_models(
         device: torch.device,
         logger: logging.Logger,
 ) -> tuple:
-    """
-    ▒~I▒~E▒ autoencoder ▒~H~G UNet 模▒~^~K▒~@~B
-
-    修正:
-      1. autoencoder ▒~Z~D torch.load ▒~J| ▒~E▒ map_location▒~H▒~N~_▒~K碼缺▒~Q▒~I
-      2. ▒~J| ▒~E▒ weights_only=False▒~H▒~X~N確▒~L~G▒~Z▒~L▒~A▒▒~E~M▒~\▒▒~F▒~I~H▒~\▒警▒~Q~J▒~I
-      3. ▒~I▒~E▒▒~L▒~K▒~M▒ eval()▒~H▒~N~_▒~K碼延▒~A▒▒~H▒ run_inference ▒~I~M設▒~Z▒~I
-      4. ▒~O▒▒~A▒ torch.compile ▒~J| ▒~@~_▒~N▒▒~P~F
-    """
-    # ▒~T~@▒~T~@ Autoencoder ▒~T~@▒~T~@
     autoencoder = load_autoencoder(args, device, logger)
 
-    # ▒~T~@▒~T~@ UNet ▒~T~@▒~T~@
     unet = define_instance(args, "diffusion_unet_def").to(device)
     checkpoint = torch.load(
         f"{args.model_dir}/{args.model_filename}",
@@ -210,14 +167,7 @@ def load_models(
 
     return autoencoder, unet, shift_factor, scale_factor
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 資料準備
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 def load_filenames(data_list_path: str, mode: str) -> list:
-    """從 JSON 資料清單載入檔名並轉換為 embedding/prediction 路徑。"""
     with open(data_list_path, "r") as file:
         json_data = json.load(file)
     return [
@@ -237,11 +187,6 @@ def prepare_file_list(
         include_body_region: bool,
         include_modality: bool,
 ) -> list:
-    """
-    建立包含完整路徑的檔案清單，跳過不存在的檔案。
-
-    修正: 原始碼用 range(len(...)) 迭代，改為直接迭代 item。
-    """
     files_list = []
     for item in filenames:
         str_src_img = os.path.join(embedding_base_dir, mode, item["src_image"])
@@ -274,13 +219,6 @@ def prepare_data(
         include_modality: bool = True,
         modality_mapping: Optional[dict] = None,
 ) -> DataLoader:
-    """
-    建立 DataLoader。
-
-    修正:
-      - pin_memory=True: 加速 CPU→GPU 資料傳輸（需搭配 non_blocking=True）
-      - persistent_workers=True: 避免每個 epoch 重啟 worker 進程
-    """
     transforms_list = [
         monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
         monai.transforms.EnsureChannelFirstd(
@@ -346,12 +284,6 @@ def prepare_data(
         persistent_workers=use_persistent,
     )
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 非同步 I/O
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 def _save_single_image(
         data: np.ndarray,
         out_spacing: np.ndarray,
@@ -359,7 +291,6 @@ def _save_single_image(
         data_root_dir: str,
         logger: logging.Logger,
 ) -> None:
-    """單一影像的磁碟寫入（在背景執行緒執行）。"""
     try:
         out_affine = np.eye(4)
         for i in range(3):
@@ -380,12 +311,6 @@ def save_images_async(
         data_root_dir: str,
         logger: logging.Logger,
 ) -> list[Future]:
-    """
-    非同步批次寫入影像。
-
-    問題: 原始碼 save_images 為同步寫入，GPU 需等待磁碟 I/O 完成。
-    解法: 使用 ThreadPoolExecutor 讓 I/O 在背景執行緒完成。
-    """
     futures = []
     for data, out_spacing, filename in zip(datas, out_spacings, output_names):
         fut = executor.submit(
@@ -399,16 +324,10 @@ def save_images_async(
         futures.append(fut)
     return futures
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# UNet 呼叫封裝
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
 def _call_unet(
         unet: torch.nn.Module,
         x: torch.Tensor,
-        t: float,
+        t: torch.Tensor,
         spacing_tensor: torch.Tensor,
         include_body_region: bool,
         include_modality: bool,
@@ -416,16 +335,9 @@ def _call_unet(
         bottom_region_index_tensor: Optional[torch.Tensor],
         modality_tensor: Optional[torch.Tensor],
 ) -> torch.Tensor:
-    """
-    純函式形式呼叫 UNet。
-
-    問題: 原始碼在每個 timestep 的迴圈體內定義 model_warpper（拼字錯誤），
-          導致每步重複建立閉包，且閉包捕捉外部可變引用有潛在風險。
-    解法: 抽為獨立函式，所有依賴透過參數顯式傳入。
-    """
     unet_inputs = {
         "x": x,
-        "timesteps": torch.Tensor((t,)).repeat(x.shape[0]).to(x.device),
+        "timesteps": t,
         "spacing_tensor": spacing_tensor,
     }
     if include_body_region:
@@ -434,12 +346,6 @@ def _call_unet(
     if include_modality:
         unet_inputs["class_labels"] = modality_tensor
     return unet(**unet_inputs)
-
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# 主推理迴圈
-# ═══════════════════════════════════════════════════════════════════════════════
-
 
 def run_inference(
         data_root_dir: str,
@@ -457,25 +363,8 @@ def run_inference(
         io_executor: ProcessPoolExecutor,
         cleanup_interval: int = 20,
 ) -> None:
-    """
-    執行擴散模型推理並儲存結果。
-
-    修正:
-      1. 回傳型別 np.ndarray → None（原始碼無 return 但標註 np.ndarray）
-      2. with A and B → with A, B（致命語法錯誤）
-      3. SlidingWindowInferer 移至迴圈外 + cache_roi_weight_map=True
-      4. model_wrapper 改為 batch 迴圈內建立一次薄封裝（呼叫 _call_unet）
-      5. 移除未使用的 tar_images 載入
-      6. non_blocking=True 搭配 pin_memory
-      7. .cpu().detach() → .float().cpu()（inference_mode 下 detach 多餘）
-      8. 非同步 I/O 寫入
-      9. 定期清理 Future 與 CUDA cache
-    """
     unet.eval()
     autoencoder.eval()
-
-    # 修正: 原始碼在每個 batch 的 autocast 區塊內重建 SlidingWindowInferer
-    # 移至迴圈外並啟用權重圖快取，避免重複計算高斯權重
 
     pending_futures: list[Future] = []
     batch_count = 0
@@ -489,10 +378,6 @@ def run_inference(
         src_images = eval_data["src_image"].to(device, non_blocking=True)
         tar_images = eval_data["tar_image"].to(device, non_blocking=True)
         spacing_tensor = eval_data["spacing"].to(device, non_blocking=True)
-
-        # 修正: 移除原始碼中載入但未使用的 tar_images，節省 GPU 記憶體
-        # 原始碼: tar_images = eval_data["tar_image"].to(device)
-
 
         top_region_index_tensor = None
         bottom_region_index_tensor = None
@@ -517,20 +402,16 @@ def run_inference(
 
         mu_t = src_images
 
-        # 修正: batch 迴圈內建立一次薄封裝，而非在 timestep 迴圈內重複定義
-        # 透過 _call_unet 純函式避免閉包捕捉可變引用問題
         def model_wrapper(t, x):
-            return _call_unet(
-                unet,
-                (x-shift_factor)*scale_factor,
-                t,
-                spacing_tensor,
-                include_body_region,
-                include_modality,
-                top_region_index_tensor,
-                bottom_region_index_tensor,
-                modality_tensor,
-            )
+            return _call_unet(unet,
+                              x,
+                              torch.Tensor((t,)).repeat(x.shape[0]).to(x.device),
+                              spacing_tensor,
+                              include_body_region,
+                              include_modality,
+                              top_region_index_tensor,
+                              bottom_region_index_tensor,
+                              modality_tensor)  * scale_factor + shift_factor
 
         with torch.inference_mode(), torch.autocast(
                 device_type=device.type, enabled=True, dtype=torch.float32
@@ -538,18 +419,14 @@ def run_inference(
             for t, next_t in zip(all_timesteps, all_next_timesteps):
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
 
-            # Decode latent ▒~F~R image
         with torch.inference_mode(), torch.autocast(
                 device_type=device.type, enabled=True, dtype=torch.float32
         ):
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
 
-        # ── Post-process on CPU ──
-        # 修正: inference_mode 下不需 .detach()，直接 .float().cpu()
         datas = predict_images.squeeze(1).float().cpu().numpy()
         out_spacings = eval_data["spacing"].cpu().numpy()
 
-        # 反正規化: [b_min, b_max] → [a_min, a_max]
         datas = (
                 (datas - INTENSITY_B_MIN)
                 / (INTENSITY_B_MAX - INTENSITY_B_MIN)
@@ -558,7 +435,6 @@ def run_inference(
         )
         datas = np.int16(np.clip(datas, INTENSITY_A_MIN, INTENSITY_A_MAX))
 
-        # 修正: 非同步寫入取代同步 save_images
         futures = save_images_async(
             io_executor,
             datas,
@@ -569,17 +445,15 @@ def run_inference(
         )
         pending_futures.extend(futures)
 
-        # 主動釋放 GPU tensor
         del src_images, mu_t, predict_images
         if include_body_region:
             del top_region_index_tensor, bottom_region_index_tensor
         if include_modality:
             del modality_tensor
 
-        # 定期清理: 等待累積的 I/O 完成 + 釋放 CUDA cache
         if batch_count % cleanup_interval == 0:
             for fut in pending_futures:
-                fut.result()  # 同時檢查是否有寫入錯誤
+                fut.result()
             pending_futures.clear()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
@@ -604,15 +478,6 @@ def diff_model_infer(
         model_def_path: str,
         num_gpus: int,
 ) -> None:
-    """
-    擴散模型推理主函式。
-
-    Args:
-        env_config_path: 環境設定檔路徑。
-        model_config_path: 模型設定檔路徑。
-        model_def_path: 模型定義檔路徑。
-        num_gpus: 推理使用的 GPU 數量。
-    """
     args = load_config(env_config_path, model_config_path, model_def_path)
     if "autoencoder_tp_num_splits" in args.diffusion_unet_inference:
         args.autoencoder_def["num_splits"] = args.diffusion_unet_inference[
@@ -623,7 +488,6 @@ def diff_model_infer(
     local_rank, world_size, device = initialize_distributed(num_gpus)
     logger = setup_logging("inference")
 
-    # ── 隨機種子 ──
     raw_seed = args.diffusion_unet_inference.get("random_seed", None)
     if raw_seed is not None:
         raw_seed += local_rank
@@ -632,7 +496,6 @@ def diff_model_infer(
         f"Using {device} of {world_size} with random seed: {random_seed}"
     )
 
-    # ── 載入模型 ──
     autoencoder, unet, shift_factor, scale_factor = load_models(
         args, device, logger
     )
@@ -646,7 +509,6 @@ def diff_model_infer(
         input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
     )
 
-    # ── 條件輸入判斷 ──
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
 
@@ -656,8 +518,6 @@ def diff_model_infer(
     else:
         args.modality_mapping = None
 
-    # ── 載入檔案清單 ──
-    # 修正: 移除原始碼中載入但未使用的 filenames_test
     filenames_train = load_filenames(args.json_data_list, mode="training")
     filenames_val = load_filenames(args.json_data_list, mode="validation")
     filenames_test = load_filenames(args.json_data_list, mode="test")
@@ -665,6 +525,7 @@ def diff_model_infer(
     if local_rank == 0:
         logger.info(f"num_files_train: {len(filenames_train)}")
         logger.info(f"num_files_val: {len(filenames_val)}")
+        logger.info(f"num_files_test: {len(filenames_test)}")
 
     train_files = prepare_file_list(
         filenames_train,
@@ -688,7 +549,6 @@ def diff_model_infer(
         include_modality,
     )
 
-    # ── 分散式資料分割 ──
     if dist.is_initialized():
         train_files = partition_dataset(
             data=train_files,
@@ -748,13 +608,11 @@ def diff_model_infer(
     else:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
-    # ── 非同步 I/O 執行緒池 ──
     io_executor = ProcessPoolExecutor(max_workers=8)
     cleanup_interval = 50
     save_dir_base = os.path.join(args.output_dir, timestamp)
 
     try:
-        # 修正: 原始碼 data = run_inference(...) 但函式無回傳值 # ("training", train_loader),
         for mode, loader in [("validation", val_loader), ("test", test_loader), ("training", train_loader)]:
             save_dir = os.path.join(save_dir_base, mode)
             os.makedirs(save_dir, exist_ok=True)
@@ -786,8 +644,8 @@ def diff_model_infer(
                 io_executor=io_executor,
                 cleanup_interval=cleanup_interval
             )
+            dist.barrier()
     finally:
-        # 確保所有 I/O 完成後才關閉執行緒池
         io_executor.shutdown(wait=True)
 
     # ── 分散式清理 ──

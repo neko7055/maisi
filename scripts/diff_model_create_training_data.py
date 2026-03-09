@@ -111,7 +111,6 @@ def load_model(args: argparse.Namespace, device, logger) -> torch.nn.Module:
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
     expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
-    # if args.trained_autoencoder_path.replace(".pt", f"_my.pt") exists, load it instead (for resuming training or using pre-expanded model)
     my_checkpoint_path = args.trained_autoencoder_path.replace(".pt", f"_my.pt")
     if os.path.exists(my_checkpoint_path):
         checkpoint_autoencoder = torch.load(
