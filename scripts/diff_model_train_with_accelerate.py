@@ -14,6 +14,7 @@ from functools import partial
 from pathlib import Path
 from types import MethodType
 from typing import Optional
+import gc
 
 import monai
 import torch
@@ -25,7 +26,7 @@ from focal_frequency_loss import FocalFrequencyLoss as FFL
 
 from .optimizer import Lion, Lookahead
 from .diff_model_setting import load_config, setup_logging
-from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate
+from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate, polynomial_interpolate
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 from .ssim import _ssim_3D
 from .utils import define_instance
@@ -35,6 +36,12 @@ from .utils import define_instance
 # torch.backends.cudnn.allow_tf32 = True
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
+
+def cosine_similarity_loss(y_t, y_prime_t):
+    y_t = torch.flatten(y_t, start_dim=1)  # Flatten all dimensions except batch
+    y_prime_t = torch.flatten(y_prime_t, start_dim=1)
+    cos_sim = torch.nn.functional.cosine_similarity(y_t, y_prime_t, dim=1)
+    return 1 - torch.mean(cos_sim)
 
 def x_sigmoid_loss(y_t, y_prime_t):
     ey_t = y_t - y_prime_t
@@ -109,7 +116,6 @@ class SpectralL1Loss(torch.nn.Module):
         loss_spectral = loss_real + loss_imag
 
         return loss_spectral
-
 
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
@@ -236,10 +242,10 @@ def calculate_scale_factor(train_files, accelerator: Accelerator, logger: loggin
     def _calculate(tensor_list):
         if len(tensor_list) > 0:
             all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64)  # [B, C, D, H, W]
-            mean = torch.mean(all_data, dim=0, keepdim=True)
-            std = torch.std(all_data, dim=0, keepdim=True, correction=0)
-            shift_factor = mean  # median_data
-            scale_factor = 1 / std  # mad
+            #mean = torch.mean(all_data, dim=0, keepdim=True)
+            #std = torch.std(all_data, dim=0, keepdim=True, correction=0)
+            shift_factor = torch.zeros(*all_data.shape[2:], device=accelerator.device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)#mean  # median_data
+            scale_factor = torch.ones(*all_data.shape[2:], device=accelerator.device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)#1 / std  # mad
         else:
             # Fallback if a process has no data (unlikely with proper partition)
             scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
@@ -477,16 +483,19 @@ def train_one_epoch(
 
         # Logic remains same
         assert isinstance(noise_scheduler, RFlowScheduler)
-
-        timesteps = [noise_scheduler.sample_timesteps(src_images) for _ in range(time_batch_size)]
+        start_timestep = torch.zeros((src_images.shape[0],), device=device) # noise_scheduler.sample_timesteps(src_images)
+        end_timestep = torch.ones((src_images.shape[0],), device=device) * noise_scheduler.num_train_timesteps # noise_scheduler.sample_timesteps(src_images)
+        #start_timestep, end_timestep = torch.minimum(start_timestep, end_timestep), torch.maximum(start_timestep, end_timestep)
+        timesteps = [noise_scheduler.sample_timesteps(src_images) for _ in range(1, time_batch_size+1)]
         if timesteps:
             timesteps = torch.stack(timesteps, dim=1)
             timesteps, _ = torch.sort(timesteps, dim=1)
-
+            timesteps = list(torch.unbind(timesteps, dim=1))
+        loss = 0
         with accelerator.accumulate(unet), accelerator.autocast():
-            timestep = torch.zeros((src_images.shape[0],), device=device)
+            timestep = start_timestep
             mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timestep)
-            mu_t = src_images
+            mu_t = mu_t_gt.detach()
             d_mu_t = _call_unet(unet,
                                 mu_t,
                                 timestep,
@@ -496,12 +505,13 @@ def train_one_epoch(
                                 top_region_index_tensor,
                                 bottom_region_index_tensor,
                                 modality_tensor) * scale_factor + shift_factor
-            loss = loss_pt(d_mu_t, d_mu_t_gt)
+            loss_v = loss_pt(d_mu_t, d_mu_t_gt)
             prev_time = timestep
             for time_step in range(time_batch_size):
-                timestep = timesteps[:, time_step]
+                timestep = timesteps[time_step]
                 mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timestep)
                 dt = timestep - prev_time
+                mu_t = mu_t.requires_grad_()
                 # mu_t_half = (mu_t + 0.5 * dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps * d_mu_t)
                 # d_mu_t = _call_unet(unet,
                 #                     mu_t_half,
@@ -512,9 +522,16 @@ def train_one_epoch(
                 #                     top_region_index_tensor,
                 #                     bottom_region_index_tensor,
                 #                     modality_tensor) * scale_factor + shift_factor
-
                 mu_t = mu_t + dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps * d_mu_t
-                loss_pos = loss_pos_f(mu_t, mu_t_gt)
+                #loss_pos = loss_pos_f(mu_t, mu_t_gt)
+                loss_current = loss_v#(loss_v + loss_pos)  # / time_batch_size
+
+                accelerator.backward(loss_current)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
+                mu_t = mu_t.detach()
+
+
                 d_mu_t = _call_unet(unet,
                                     mu_t,
                                     timestep,
@@ -524,7 +541,8 @@ def train_one_epoch(
                                     top_region_index_tensor,
                                     bottom_region_index_tensor,
                                     modality_tensor) * scale_factor + shift_factor
-                res = (mu_t.detach() - mu_t_gt) / (dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps)
+                # res = (mu_t_gt - mu_t) / (dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps)
+                d_mu_t_ = (tar_images - mu_t) / (1 - timestep / noise_scheduler.num_train_timesteps)
                 d_mu_t_tf = _call_unet(unet,
                                        mu_t_gt,
                                        timestep,
@@ -534,15 +552,16 @@ def train_one_epoch(
                                        top_region_index_tensor,
                                        bottom_region_index_tensor,
                                        modality_tensor) * scale_factor + shift_factor
-                loss_v = (loss_pt(d_mu_t, d_mu_t_gt + res) + loss_pt(d_mu_t_tf, d_mu_t_gt) + loss_pt(d_mu_t,d_mu_t_tf)) / 3
 
-                loss = loss + (loss_v + loss_pos) / time_batch_size
+                loss_v = (loss_pt(d_mu_t_tf, d_mu_t_gt) + loss_pt(d_mu_t, d_mu_t_)) / 2
+                loss += loss_current.item() / (time_batch_size+1)
 
                 prev_time = timestep
 
-            timestep = torch.ones((src_images.shape[0],), device=device) * noise_scheduler.num_train_timesteps
+            timestep = end_timestep
             mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timestep)
             dt = timestep - prev_time
+            mu_t = mu_t.requires_grad_()
             # mu_t_half = (mu_t + 0.5 * dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps * d_mu_t)
             # d_mu_t = _call_unet(unet,
             #                     mu_t_half,
@@ -554,21 +573,27 @@ def train_one_epoch(
             #                     bottom_region_index_tensor,
             #                     modality_tensor) * scale_factor + shift_factor
             mu_t = mu_t + dt[:, None, None, None, None] / noise_scheduler.num_train_timesteps * d_mu_t
-            loss = loss + loss_pos_f(mu_t, mu_t_gt)
-
-            accelerator.backward(loss)
+            #loss_pos = loss_pos_f(mu_t, mu_t_gt)
+            loss_current = loss_v#(loss_v + loss_pos)  # / time_batch_size
+            accelerator.backward(loss_current)
             optimizer.step()
             optimizer.zero_grad(set_to_none=True)
+            loss += loss_current.item() / (time_batch_size+1)
+            mu_t = mu_t.detach()
 
-        loss_torch[0] += loss.item()
+        loss_torch[0] += loss
         loss_torch[1] += 1.0
 
         # if accelerator.is_main_process:
         if _iter % gradient_accumulation_steps == 0:
+            float_loss = torch.tensor(loss, dtype=torch.float32, device=accelerator.device)
+            accelerator.wait_for_everyone()
+            avg_loss = accelerator.reduce(float_loss, reduction="mean")
+            avg_float_loss = avg_loss.item()
             logger.info(
                 "[{0}] epoch {1}, iter {2}/{3}, loss: {4:.4f}, lr: {5:.12f}.".format(
                     str(datetime.now())[:19], epoch + 1, _iter // gradient_accumulation_steps,
-                                              len(train_loader) // gradient_accumulation_steps, loss.item(),
+                                              len(train_loader) // gradient_accumulation_steps, avg_float_loss,
                     current_lr
                 )
             )
@@ -618,7 +643,8 @@ def diff_model_train(
     # mixed_precision can be "no", "fp16", "bf16".
     # It is recommended to configure this via `accelerate config` CLI or pass arg here.
     args = load_config(env_config_path, model_config_path, model_def_path)
-    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"],
+    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"] * \
+                                                          (args.diffusion_unet_train["time_batch_size"]+1),
                               step_scheduler_with_optimizer=False)
 
     logger = setup_logging("training", rk_filter=True)
@@ -633,10 +659,10 @@ def diff_model_train(
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
     noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(euler_step,
+    noise_scheduler.step = MethodType(midpoint_step,
                                       noise_scheduler)  # Option: euler_step, midpoint_step, rk4_step, rk5_step
     noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False),
-                                           noise_scheduler)  # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate
+                                           noise_scheduler)  # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate, polynomial_interpolate
 
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None

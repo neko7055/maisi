@@ -48,53 +48,9 @@ def compile_model(model, shape, device):
     )
     # warmup: 觸發編譯
     with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float32):
-            example_inputs = torch.randn(1, 18, *shape, device=device)
+            example_inputs = torch.randn(1, 1, *shape, device=device)
             _ = model.encode(example_inputs)
     return model
-
-def expand_first_conv_input_channels(model: torch.nn.Module, k: int):
-    """
-    将模型第一个卷积层 (self.conv) 的 input channel 复制 k 倍。
-    新权重通过重复原始权重 k 次来初始化。
-    """
-    old_conv = model.conv
-    in_channels = old_conv.in_channels * k
-    out_channels = old_conv.out_channels
-
-    if isinstance(old_conv, torch.nn.Conv3d):
-        new_conv = torch.nn.Conv3d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            dilation=old_conv.dilation,
-            groups=old_conv.groups,
-            bias=old_conv.bias is not None,
-            padding_mode=old_conv.padding_mode,
-        )
-    elif isinstance(old_conv, torch.nn.Conv2d):
-        new_conv = torch.nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            dilation=old_conv.dilation,
-            groups=old_conv.groups,
-            bias=old_conv.bias is not None,
-            padding_mode=old_conv.padding_mode,
-        )
-    else:
-        raise TypeError(f"Unsupported conv type: {type(old_conv)}")
-
-    # 将原始权重沿 input channel 维度 (dim=1) 重复 k 次，并除以 k 保持输出尺度一致
-    with torch.no_grad():
-        new_conv.weight.copy_(old_conv.weight.repeat(1, k, *([1] * (old_conv.weight.dim() - 2))) / k)
-        if old_conv.bias is not None:
-            new_conv.bias.copy_(old_conv.bias)
-
-    model.conv = new_conv
 
 def load_model(args: argparse.Namespace, device, logger) -> torch.nn.Module:
     # Load model to CPU first, let Accelerate handle movement
@@ -106,14 +62,7 @@ def load_model(args: argparse.Namespace, device, logger) -> torch.nn.Module:
     if "unet_state_dict" in checkpoint_autoencoder.keys():
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
-    expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
-    my_checkpoint_path = args.trained_autoencoder_path.replace(".pt", f"_my.pt")
-    if os.path.exists(my_checkpoint_path):
-        checkpoint_autoencoder = torch.load(
-            my_checkpoint_path, map_location=device, weights_only=True
-        )
-        logger.info(f"Loading expanded model weights from {my_checkpoint_path}.")
-        autoencoder.load_state_dict(checkpoint_autoencoder)
+
     return autoencoder.to(device)
 
 def create_data_transforms(data_type,
@@ -128,12 +77,12 @@ def create_data_transforms(data_type,
     if "ct" in modality:
         modality = "ct"
 
-    # if modality in SUPPORT_MODALITIES:
-    #     intensity_transforms = define_fixed_intensity_transform(
-    #         modality=modality, image_keys=keys
-    #     )
-    # else:
-    #     intensity_transforms = []
+    if modality in SUPPORT_MODALITIES:
+        intensity_transforms = define_fixed_intensity_transform(
+            modality=modality, image_keys=keys
+        )
+    else:
+        intensity_transforms = []
 
     def _build_out_path(filename_str: str):
         out_base = filename_str.replace(".gz", "").replace(".nii", "")
@@ -144,7 +93,6 @@ def create_data_transforms(data_type,
 
     def _load_nifti(filepath: str):
         img = nib.load(filepath)
-        # 強制轉為 RAS（closest canonical）
         img = nib.as_closest_canonical(img)
         return img
 
@@ -199,7 +147,7 @@ def create_data_transforms(data_type,
         ),
     ]
 
-    return Compose(base_transforms)
+    return Compose(base_transforms+intensity_transforms)
 
 def build_file_list(
         json_data: dict,
@@ -269,48 +217,6 @@ def img_save(out_nda, out_path, out_affine, logger):
     except Exception as e:
         logger.error(f"Error saving {out_path}: {e}")
 
-def build_ct_channel_params(A, B, levels=None, ks=None):
-    """预计算所有 (a, b) 参数张量，只需调用一次。"""
-    if ks is None:
-        ks = [5]
-    if levels is None:
-        levels = [1, 3, 5]
-
-    a_list, b_list = [], []
-    for k_val in ks:
-        for l in levels:
-            step = (B - A) / l
-            for i in range(l):
-                s = A + step * i
-                e = s + step
-                a_list.append(k_val / (e - s))
-                b_list.append(-k_val * (e + s) / (2.0 * (e - s)))
-
-    # (N, 1, 1, 1) 用于与 (1, H, W, D) 广播
-    a_t = torch.tensor(a_list, dtype=torch.float64).reshape(-1, 1, 1, 1)
-    b_t = torch.tensor(b_list, dtype=torch.float64).reshape(-1, 1, 1, 1)
-    return a_t, b_t
-
-def apply_ct_channel_extend(x, a_t, b_t):
-    """利用预计算的参数张量，广播计算 sigmoid 扩展通道。"""
-    from monai.data import MetaTensor
-
-    meta = x.meta if isinstance(x, MetaTensor) else None
-
-    # 参数移到与 x 相同的设备
-    device = x.device if isinstance(x, torch.Tensor) else torch.device("cpu")
-    a_t = a_t.to(device=device)
-    b_t = b_t.to(device=device)
-
-    x_64 = x.to(dtype=torch.float64)
-    z = -(a_t * x_64 + b_t)
-    result = torch.sigmoid(z).to(dtype=x.dtype)
-
-    if meta is not None:
-        result = MetaTensor(result, meta=meta)
-
-    return result
-
 def process_batch(
         args: argparse.Namespace,
         batch_data: dict,
@@ -320,9 +226,7 @@ def process_batch(
         io_executor: ProcessPoolExecutor,
         logger: logging.Logger,
 ) -> list[Future]:
-    a_t, b_t = build_ct_channel_params(A=-200, B=700, levels=[1, 3, 5], ks=[4, 5])
-    et_channel = lambda x: apply_ct_channel_extend(x, a_t, b_t)
-    infer_fn = lambda input: autoencoder.encode(et_channel(input))
+    infer_fn = lambda input: autoencoder.encode(input)
     all_futures = []
     for key in ("src", "tar"):
         pt_nda = batch_data[f"{key}_image"].to(device, non_blocking=True) # size: [B, C, X, Y, Z]
@@ -450,15 +354,6 @@ def diff_model_create_training_data(
                     f"[{data_type}] Rank {local_rank} processing {len(file_list)} files."
                 )
 
-            # ── 建立 CacheDataset + DataLoader ──
-            # 參考 diff_model_infer.py 的 prepare_data：
-            #   - CacheDataset 快取前處理，多 worker 平行載入
-            #   - pin_memory=True 加速 CPU→GPU
-            #   - persistent_workers=True 避免重啟 worker
-            #
-            # 注意：src_out_path / tar_out_path 是 str，不是影像路徑，
-            #   LoadImaged 只會處理 keys=["src_image", "tar_image"]，
-            #   其他 key 會被 pass-through 保留在 dict 中。
             data_loader = prepare_data(
                 file_list=file_list,
                 transforms=data_transforms,
@@ -508,6 +403,7 @@ def diff_model_create_training_data(
             logger.info(
                 f"[{data_type}] Finished processing on rank {local_rank}."
             )
+            dist.barrier()
 
     finally:
         # 確保所有非同步 I/O 完成

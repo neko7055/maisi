@@ -41,8 +41,8 @@ from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
 
-INTENSITY_A_MIN = -200
-INTENSITY_A_MAX = 700
+INTENSITY_A_MIN = -1000
+INTENSITY_A_MAX = 1000
 INTENSITY_B_MIN = 0
 INTENSITY_B_MAX = 1
 
@@ -76,55 +76,7 @@ def compile_autoencoder_model(model, shape, device):
             _ = model.decode(example_inputs)
     return model
 
-def expand_first_conv_input_channels(model: torch.nn.Module, k: int):
-    """
-    将模型第一个卷积层 (self.conv) 的 input channel 复制 k 倍。
-    新权重通过重复原始权重 k 次来初始化。
-    """
-    old_conv = model.conv
-    in_channels = old_conv.in_channels * k
-    out_channels = old_conv.out_channels
-
-    # 判断卷积类型（2D 或 3D）
-    if isinstance(old_conv, torch.nn.Conv3d):
-        new_conv = torch.nn.Conv3d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            dilation=old_conv.dilation,
-            groups=old_conv.groups,
-            bias=old_conv.bias is not None,
-            padding_mode=old_conv.padding_mode,
-        )
-    elif isinstance(old_conv, torch.nn.Conv2d):
-        new_conv = torch.nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            dilation=old_conv.dilation,
-            groups=old_conv.groups,
-            bias=old_conv.bias is not None,
-            padding_mode=old_conv.padding_mode,
-        )
-    else:
-        raise TypeError(f"Unsupported conv type: {type(old_conv)}")
-
-    # 将原始权重沿 input channel 维度 (dim=1) 重复 k 次，并除以 k 保持输出尺度一致
-    with torch.no_grad():
-        new_conv.weight.copy_(old_conv.weight.repeat(1, k, *([1] * (old_conv.weight.dim() - 2))) / k)
-        if old_conv.bias is not None:
-            new_conv.bias.copy_(old_conv.bias)
-
-    model.conv = new_conv
-
-
 def load_autoencoder(args: argparse.Namespace, device, logger) -> torch.nn.Module:
-    # Load model to CPU first, let Accelerate handle movement
-
     autoencoder = define_instance(args, "autoencoder_def").to(device)
     checkpoint_autoencoder = torch.load(
         args.trained_autoencoder_path, map_location=device, weights_only=False
@@ -132,14 +84,6 @@ def load_autoencoder(args: argparse.Namespace, device, logger) -> torch.nn.Modul
     if "unet_state_dict" in checkpoint_autoencoder.keys():
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
-    expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
-    my_checkpoint_path = args.trained_autoencoder_path.replace(".pt", f"_my.pt")
-    if os.path.exists(my_checkpoint_path):
-        checkpoint_autoencoder = torch.load(
-            my_checkpoint_path, map_location=device, weights_only=True
-        )
-        logger.info(f"Loading expanded model weights from {my_checkpoint_path}.")
-        autoencoder.load_state_dict(checkpoint_autoencoder)
     return autoencoder.to(device)
 
 def load_models(
