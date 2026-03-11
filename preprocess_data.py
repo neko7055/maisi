@@ -17,19 +17,21 @@ def list_gz_files(folder_path):
                 gz_files.append({"filepath": os.path.join(root, file), "fileID": fileID, "type": file_type})
     return gz_files
 
-def resize_image_and_store(src_path, dest_path, new_z = 512):
+def resize_image_and_store(src_path, dest_path, new_x=256, new_y=256, new_z=64):
     img = sitk.ReadImage(src_path, sitk.sitkFloat32)
 
     orig_size = img.GetSize()  # (x, y, z)
     orig_spacing = img.GetSpacing()  # (sx, sy, sz)
+
+    # 更新為包含 x, y, z 的新尺寸
     new_size = (
-        orig_size[0],  # X 不變
-        orig_size[1],  # Y 不變
+        new_x,
+        new_y,
         new_z
     )
     new_spacing = (
-        orig_spacing[0],  # sx 不變
-        orig_spacing[1],  # sy 不變
+        orig_spacing[0] * (orig_size[0] - 1) / (new_x - 1),
+        orig_spacing[1] * (orig_size[1] - 1) / (new_y - 1),
         orig_spacing[2] * (orig_size[2] - 1) / (new_z - 1)
     )
     resampler = sitk.ResampleImageFilter()
@@ -38,11 +40,15 @@ def resize_image_and_store(src_path, dest_path, new_z = 512):
     resampler.SetOutputDirection(img.GetDirection())
     resampler.SetOutputOrigin(img.GetOrigin())
     resampler.SetTransform(sitk.Transform())
-    resampler.SetInterpolator(sitk.sitkLinear)  # CT
+    resampler.SetInterpolator(sitk.sitkLanczosWindowedSinc)  # CT
     resampler.SetDefaultPixelValue(-1000)
 
     resampled_img = resampler.Execute(img)
-    sitk.WriteImage(resampled_img, dest_path)
+    writer = sitk.ImageFileWriter()
+    writer.SetFileName(dest_path)
+    writer.SetUseCompression(True)
+    writer.SetCompressionLevel(9)
+    writer.Execute(resampled_img)
 
 # Worker initializer: run once per child process
 def _worker_init():
