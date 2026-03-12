@@ -61,11 +61,11 @@ def _worker_init():
 
 # Worker wrapper: receives tuple args to be picklable
 def _worker_resize(args):
-    src_path, dest_path, new_z = args
+    src_path, dest_path, new_x, new_y, new_z = args
     try:
         # Ensure SimpleITK imported in child (module import at top already imported, but safe)
         # Do resize
-        resize_image_and_store(src_path, dest_path, new_z=new_z)
+        resize_image_and_store(src_path, dest_path,new_x=new_x,new_y=new_y, new_z=new_z)
         return (src_path, dest_path, True, "")
     except Exception as e:
         return (src_path, dest_path, False, str(e))
@@ -73,8 +73,10 @@ def _worker_resize(args):
 if __name__ == "__main__":
     raw_data_dir = "/work/r12946008/CENC_CEfixed"
     data_split_json = os.path.join(raw_data_dir, "dataset_split.json")
-    z=512
-    data_dir = "./CVAI_data" + f"_z{z}"
+    x=512
+    y=512
+    z=256
+    data_dir = "./CVAI_data"+ f"_x{x}"+ f"_y{y}" + f"_z{z}"
     os.makedirs(data_dir, exist_ok=True)
     dataroot_dir = os.path.join(data_dir, "data")
     os.makedirs(dataroot_dir, exist_ok=True)
@@ -89,6 +91,8 @@ if __name__ == "__main__":
 
     # Build job list: (src_path, dest_path, new_z)
     jobs = []
+    new_x = x
+    new_y = y
     new_z = z
     for mode in ["training", "validation", "test"]:
         out_dir = os.path.join(dataroot_dir, mode)
@@ -101,7 +105,7 @@ if __name__ == "__main__":
                 src_path = f["filepath"]
                 filename = os.path.basename(src_path)
                 dest_path = os.path.join(out_dir, filename)
-                jobs.append((src_path, dest_path, new_z))
+                jobs.append((src_path, dest_path,new_x, new_y, new_z))
     # Run pool: choose processes conservatively
     cpu_count = max(1, min(multiprocessing.cpu_count(), len(jobs)))
     processes = cpu_count if cpu_count > 0 else 1
