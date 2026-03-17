@@ -95,3 +95,83 @@ def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True) :
     d_mu_t = d_mu_coef * images
     noise = torch.randn_like(mu_t)
     return mu_t + z_coef * noise, d_mu_t + d_z_coef * noise
+
+def spacial_interpolate(
+    self,x0, x1, t, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001
+):
+    """
+    x0, x1: [B, C, D, H, W] 或 [B, D, H, W]
+    t:      [B]
+    return:
+        xt:    same shape as x0
+        dx_dt: same shape as x0, 表示每個 sample 各自對應 t[b] 的偏微分
+    """
+    t = t.float() / self.num_train_timesteps
+    if x0.shape != x1.shape:
+        raise ValueError("x0 and x1 must have the same shape")
+    if t.ndim != 1 or t.shape[0] != x0.shape[0]:
+        raise ValueError("t must have shape [B]")
+
+    B = x0.shape[0]
+    D, H, W = x0.shape[-3:]
+    device, dtype = x0.device, x0.dtype
+    t = t.to(device=device, dtype=dtype)
+
+    F0 = torch.fft.rfftn(x0, dim=(-3, -2, -1), norm="ortho")
+    F1 = torch.fft.rfftn(x1, dim=(-3, -2, -1), norm="ortho")
+    dF = F1 - F0
+
+    # 2. 計算正規化頻率半徑 rho (0 ~ 1)
+    fz = torch.fft.fftfreq(D, d=1.0, device=device).to(dtype).view(1, D, 1, 1)
+    fy = torch.fft.fftfreq(H, d=1.0, device=device).to(dtype).view(1, 1, H, 1)
+    fx = torch.fft.rfftfreq(W, d=1.0, device=device).to(dtype).view(1, 1, 1, W // 2 + 1)
+
+    rho = torch.sqrt(fz ** 2 + fy ** 2 + fx ** 2)
+    rho = rho / (rho.max() + eps)
+
+    # 3. 計算每個頻率對應的 a 參數
+    a = a_max * rho
+    if x0.ndim == 5:
+        a = a.unsqueeze(1)  # 擴展 channel 維度 [1, 1, D, H, Wr]
+
+    t_view = t.view(B, *([1] * (F0.ndim - 1)))
+
+    # 4. 計算插值權重 M 與 偏微分 dM/dt
+    # 為了避免 a=0 時出現 0/0 導致 NaN，使用 mask 切換計算方式
+    mask_small = a < 1e-4
+
+    # --- 正常計算 (a >= 1e-4) ---
+    exp_a = torch.exp(a)
+    exp_at = torch.exp(a * t_view)
+    denom = exp_a - 1.0
+
+    M_normal = (exp_at - 1.0) / denom
+    dM_dt_normal = a * exp_at / denom
+
+    # --- 泰勒展開近似計算 (a < 1e-4 包含 0 頻率) ---
+    M_small = t_view + 0.5 * a * t_view * (t_view - 1.0)
+    dM_dt_small = 1.0 + a * (t_view - 0.5)
+
+    # 結合兩者
+    M = torch.where(mask_small, M_small, M_normal)
+    dM_dt = torch.where(mask_small, dM_dt_small, dM_dt_normal)
+
+    # 5. 頻域混合與微分
+    Y = F0 + M * dF
+    dY_dt = dM_dt * dF
+
+    # 6. 轉回空間域
+    mu_t = torch.fft.irfftn(Y, s=(D, H, W), dim=(-3, -2, -1), norm="ortho")
+    d_mu_t = torch.fft.irfftn(dY_dt, s=(D, H, W), dim=(-3, -2, -1), norm="ortho")
+
+    if add_noise:
+        t = t[..., None, None, None, None]
+        a = -a_max
+        g_t = (1 - torch.exp(-a * t)) / (1 - math.exp(-a))
+        dg_t = (a * torch.exp(-a * t)) / (1 - math.exp(-a))
+        noise = torch.randn_like(mu_t)
+        z_coef = sigma_0 + g_t * (sigma_1 - sigma_0)
+        dz_coef = dg_t * (sigma_1 - sigma_0)
+        return mu_t + z_coef * noise, d_mu_t + dz_coef * noise
+    else:
+        return mu_t, d_mu_t
