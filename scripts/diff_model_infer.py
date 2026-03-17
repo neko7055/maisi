@@ -615,7 +615,8 @@ def diff_model_infer(
                 io_executor=io_executor,
                 cleanup_interval=cleanup_interval
             )
-            dist.barrier()
+            if dist.is_initialized():
+                dist.barrier()
     finally:
         io_executor.shutdown(wait=True)
 

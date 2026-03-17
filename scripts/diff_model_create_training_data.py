@@ -390,7 +390,8 @@ def diff_model_create_training_data(
             logger.info(
                 f"[{data_type}] Finished processing on rank {local_rank}."
             )
-            dist.barrier()
+            if dist.is_initialized():
+                dist.barrier()
 
     finally:
         # 確保所有非同步 I/O 完成
