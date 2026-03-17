@@ -385,7 +385,7 @@ def run_inference(
                               modality_tensor)  * scale_factor + shift_factor
 
         with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.float32
+                device_type=device.type, enabled=True, dtype=torch.bfloat16
         ):
             for t, next_t in zip(all_timesteps, all_next_timesteps):
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
