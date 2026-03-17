@@ -15,10 +15,11 @@ import json
 import logging
 import os
 import random
-from concurrent.futures import Future, ProcessPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from types import MethodType
 from typing import Optional
+import gc
 
 import nibabel as nib
 import numpy as np
@@ -58,23 +59,6 @@ def _load_json_field(file_path: str, key: str, convert_to_float: bool = True):
     if convert_to_float:
         return torch.FloatTensor(data[key])
     return data[key]
-
-def compile_autoencoder_model(model, shape, device):
-    """
-    編譯 autoencoder 的 encode 方法，使用 torch.compile 而非私有 API。
-    """
-    model = torch.compile(
-        model,
-        mode="max-autotune",
-        fullgraph=False,
-        dynamic=False,
-        backend="inductor",
-    )
-    # warmup: 觸發編譯
-    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float32):
-            example_inputs = torch.randn(1, 4, *shape, device=device)
-            _ = model.decode(example_inputs)
-    return model
 
 def load_autoencoder(args: argparse.Namespace, device, logger) -> torch.nn.Module:
     autoencoder = define_instance(args, "autoencoder_def").to(device)
@@ -163,18 +147,56 @@ def prepare_data(
         include_modality: bool = True,
         modality_mapping: Optional[dict] = None,
 ) -> DataLoader:
+
+    def _load_nifti(filepath: str):
+        img = nib.load(filepath)
+        return img
+
+    def _read_affine(img) -> np.ndarray:
+        try:
+            return img.affine.astype(np.float64)
+        except Exception as e:
+            return np.eye(4).astype(np.float64)
+
+    def _nifti_as_tensor(img)-> torch.Tensor:
+        data = img.get_fdata(caching='unchanged', dtype=np.float32)
+        if data.ndim == 3:
+            # (X, Y, Z) → (1, X, Y, Z)
+            data = data[np.newaxis, ...]
+        elif data.ndim == 4:
+            # (X, Y, Z, C) → (C, X, Y, Z)
+            data = data.transpose(3, 0, 1, 2)
+
+        return torch.from_numpy(data.copy())
+
     transforms_list = [
-        monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
-        monai.transforms.EnsureChannelFirstd(
-            keys=["src_image", "tar_image"], channel_dim=-1
+        monai.transforms.Lambdad(
+            keys=["src_image", "tar_image"],
+            func=_load_nifti,
+            track_meta=False,
+            overwrite=True,
+        ),
+        monai.transforms.Lambdad(
+            keys=["src_image", "tar_image"],
+            func=_read_affine,
+            track_meta=False,
+            overwrite=["src_affine", "tar_affine"],
+        ),
+        monai.transforms.Lambdad(
+            keys=["src_image", "tar_image"],
+            func=_nifti_as_tensor,
+            track_meta=False,
+            overwrite=True,
         ),
         monai.transforms.Lambdad(
             keys="spacing",
             func=lambda x: _load_json_field(x, "spacing"),
+            track_meta=False,
         ),
         monai.transforms.Lambdad(
             keys="spacing",
             func=lambda x: x * 1e2,
+            track_meta=False,
         ),
     ]
 
@@ -183,18 +205,22 @@ def prepare_data(
             monai.transforms.Lambdad(
                 keys="top_region_index",
                 func=lambda x: _load_json_field(x, "top_region_index"),
+                track_meta=False,
             ),
             monai.transforms.Lambdad(
                 keys="bottom_region_index",
                 func=lambda x: _load_json_field(x, "bottom_region_index"),
+                track_meta=False,
             ),
             monai.transforms.Lambdad(
                 keys="top_region_index",
                 func=lambda x: x * 1e2,
+                track_meta=False,
             ),
             monai.transforms.Lambdad(
                 keys="bottom_region_index",
                 func=lambda x: x * 1e2,
+                track_meta=False,
             ),
         ]
 
@@ -205,9 +231,10 @@ def prepare_data(
                 func=lambda x: modality_mapping[
                     _load_json_field(x, "modality", convert_to_float=False)
                 ],
+                track_meta=False,
             ),
             monai.transforms.EnsureTyped(
-                keys=["modality"], dtype=torch.long
+                keys=["modality"], dtype=torch.long,track_meta=False,
             ),
         ]
 
@@ -230,15 +257,13 @@ def prepare_data(
 
 def _save_single_image(
         data: np.ndarray,
-        out_spacing: np.ndarray,
+        out_affine: np.ndarray,
         filename: str,
         data_root_dir: str,
         logger: logging.Logger,
 ) -> None:
     try:
-        out_affine = np.eye(4)
-        for i in range(3):
-            out_affine[i, i] = out_spacing[i]
+        out_affine = out_affine.copy()
         output_path = os.path.join(data_root_dir, filename)
         os.makedirs(os.path.dirname(output_path), exist_ok=True)
         nib.save(nib.Nifti1Image(data, affine=out_affine), output_path)
@@ -248,19 +273,19 @@ def _save_single_image(
 
 
 def save_images_async(
-        executor: ProcessPoolExecutor,
+        executor: ThreadPoolExecutor,
         datas: np.ndarray,
-        out_spacings: np.ndarray,
+        out_affines: np.ndarray,
         output_names: list,
         data_root_dir: str,
         logger: logging.Logger,
 ) -> list[Future]:
     futures = []
-    for data, out_spacing, filename in zip(datas, out_spacings, output_names):
+    for data, out_affine, filename in zip(datas, out_affines, output_names):
         fut = executor.submit(
             _save_single_image,
             data,
-            out_spacing,
+            out_affine,
             filename,
             data_root_dir,
             logger,
@@ -304,7 +329,7 @@ def run_inference(
         include_body_region: bool,
         include_modality: bool,
         device: torch.device,
-        io_executor: ProcessPoolExecutor,
+        io_executor: ThreadPoolExecutor,
         cleanup_interval: int = 20,
 ) -> None:
     unet.eval()
@@ -343,6 +368,8 @@ def run_inference(
         all_next_timesteps = torch.cat(
             (all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype))
         )
+        all_timesteps, all_next_timesteps = torch.flip(all_next_timesteps, dims=[-1]), torch.flip(all_timesteps,
+                                                                                                  dims=[-1])
 
         mu_t = src_images
 
@@ -364,12 +391,12 @@ def run_inference(
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
 
         with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.float32
+                device_type=device.type, enabled=True, dtype=torch.bfloat16
         ):
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
 
         datas = predict_images.squeeze(1).float().cpu().numpy()
-        out_spacings = eval_data["spacing"].cpu().numpy()
+        out_affines = eval_data["src_affine"].cpu().numpy()
 
         datas = (
                 (datas - INTENSITY_B_MIN)
@@ -382,14 +409,14 @@ def run_inference(
         futures = save_images_async(
             io_executor,
             datas,
-            out_spacings,
+            out_affines,
             eval_data["out_name"],
             data_root_dir,
             logger,
         )
         pending_futures.extend(futures)
 
-        del src_images, mu_t, predict_images
+        del src_images,tar_images, mu_t, predict_images
         if include_body_region:
             del top_region_index_tensor, bottom_region_index_tensor
         if include_modality:
@@ -399,6 +426,7 @@ def run_inference(
             for fut in pending_futures:
                 fut.result()
             pending_futures.clear()
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -406,6 +434,7 @@ def run_inference(
     for fut in pending_futures:
         fut.result()
     pending_futures.clear()
+    gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
@@ -428,7 +457,7 @@ def diff_model_infer(
             "autoencoder_tp_num_splits"
         ]
     args.autoencoder_def["save_mem"] = False
-    args.autoencoder_def["norm_float16"] = False
+    args.autoencoder_def["norm_float16"] = True
     local_rank, world_size, device = initialize_distributed(num_gpus)
     logger = setup_logging("inference")
 
@@ -443,8 +472,6 @@ def diff_model_infer(
     autoencoder, unet, shift_factor, scale_factor = load_models(
         args, device, logger
     )
-    autoencoder = compile_autoencoder_model(autoencoder, args.diffusion_unet_inference["slide_window_size"], device)
-
     # ── Noise scheduler ──
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(rk5_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
@@ -552,7 +579,7 @@ def diff_model_infer(
     else:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
-    io_executor = ProcessPoolExecutor(max_workers=8)
+    io_executor = ThreadPoolExecutor(max_workers=4)
     cleanup_interval = 50
     save_dir_base = os.path.join(args.output_dir, timestamp)
 
@@ -565,8 +592,8 @@ def diff_model_infer(
                 roi_size=args.diffusion_unet_inference["slide_window_size"],
                 sw_batch_size=args.diffusion_unet_inference["sw_batch_size"],
                 progress=False,
-                mode="gaussian",
-                overlap=0.5,
+                mode="constant",
+                overlap=0.875,
                 sw_device=device,
                 device=device,
                 cache_roi_weight_map=True,
@@ -593,6 +620,8 @@ def diff_model_infer(
         io_executor.shutdown(wait=True)
 
     # ── 分散式清理 ──
+    del train_loader, val_loader, test_loader
+    gc.collect()
     if dist.is_available() and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

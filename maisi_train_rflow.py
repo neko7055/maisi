@@ -42,20 +42,14 @@ def run_torchrun(module, module_args,accelerate_config_path, num_gpus=1):
 
     # Print the output in real-time
     try:
-        while True:
-            output = process.stdout.readline()
-            if output == "" and process.poll() is not None:
-                break
-            if output:
-                print(output.strip())
+        for line in process.stdout:  # 比 readline() 更 Pythonic
+            print(line, end="")
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
-        # Capture and print any remaining output
-        stdout, stderr = process.communicate()
-        print(stdout)
-        if stderr:
-            print(stderr)
+        process.stdout.close()
+        return_code = process.wait()  # ← 用 wait() 而非 communicate()
+        print(f"Process exited with code: {return_code}")
     return
 
 if __name__ == "__main__":
@@ -72,7 +66,7 @@ if __name__ == "__main__":
     model_config_path = os.path.join(configs_dir, "model_train_infer_config.json")
     model_def_path = os.path.join(configs_dir, "model_def.json")
 
-    accelerate_config_path = "./accelerate_configs/h100_8gpu_1node_bf16.yaml"
+    accelerate_config_path = "./accelerate_configs/cuda_8gpu_1node_bf16.yaml"
 
     with open(env_config_path, "r") as f:
         env_config = json.load(f)

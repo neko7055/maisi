@@ -40,7 +40,7 @@ class Lion(Optimizer):
 
 
 class Lookahead(Optimizer):
-    def __init__(self, optimizer, alpha=0.5, k=6, pullback_momentum="none"):
+    def __init__(self, optimizer, alpha=0.5, k=5, pullback_momentum="pullback"):
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f'Invalid slow update rate: {alpha}')
         if not 1 <= k:
@@ -123,21 +123,37 @@ class Lookahead(Optimizer):
                     if param_state['cached_params'].device != p.device:
                         param_state['cached_params'] = param_state['cached_params'].to(p.device)
 
+                    # 更新慢權重，並將快權重同步為新的慢權重
                     p.data.mul_(self.alpha).add_(param_state['cached_params'],
                                                  alpha=1.0 - self.alpha)
                     param_state['cached_params'].copy_(p.data)
 
+                    # 處理動量 (Momentum)
                     if self.pullback_momentum == "pullback":
-                        internal_momentum = self.optimizer.state[p]["momentum_buffer"]
-                        if "cached_mom" not in param_state:
-                            param_state["cached_mom"] = internal_momentum.clone()
-                        elif param_state["cached_mom"].device != p.device:
-                            param_state["cached_mom"] = param_state["cached_mom"].to(p.device)
+                        for momentum_buffer in ["exp_avg", "exp_avg_sq"]:
+                            if momentum_buffer not in self.optimizer.state[p]:
+                               continue
 
-                        self.optimizer.state[p]["momentum_buffer"] = internal_momentum.mul_(self.alpha).add_(
-                            param_state["cached_mom"], alpha=1.0 - self.alpha)
-                        param_state["cached_mom"] = self.optimizer.state[p]["momentum_buffer"].clone()
+                            cached_name = "cached_" + momentum_buffer
+                            internal_momentum = self.optimizer.state[p][momentum_buffer]
+
+                            if cached_name not in param_state:
+                                param_state[cached_name] = internal_momentum.clone()
+                            elif param_state[cached_name].device != p.device:
+                                param_state[cached_name] = param_state[cached_name].to(p.device)
+
+                            # 線性插值動量
+                            internal_momentum.mul_(self.alpha).add_(
+                                param_state[cached_name], alpha=1.0 - self.alpha)
+                            param_state[cached_name] = internal_momentum.clone()
+
                     elif self.pullback_momentum == "reset":
-                        self.optimizer.state[p]["momentum_buffer"] = torch.zeros_like(p.data)
+                        for momentum_buffer in ["exp_avg", "exp_avg_sq"]:
+                            # 【修正處 1】: 必須檢查內部的優化器狀態
+                            if momentum_buffer not in self.optimizer.state[p]:
+                                continue
+
+                            # 【修正處 2】: 使用 in-place 的 .zero_() 防止破壞記憶體參考
+                            self.optimizer.state[p][momentum_buffer].zero_()
 
         return loss

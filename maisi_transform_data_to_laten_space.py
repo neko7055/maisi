@@ -75,20 +75,14 @@ def run_torchrun(module, module_args, num_gpus=1):
 
     # Print the output in real-time
     try:
-        while True:
-            output = process.stdout.readline()
-            if output == "" and process.poll() is not None:
-                break
-            if output:
-                print(output.strip())
+        for line in process.stdout:  # 比 readline() 更 Pythonic
+            print(line, end="")
     except Exception as e:
         print(f"An error occurred: {e}")
     finally:
-        # Capture and print any remaining output
-        stdout, stderr = process.communicate()
-        print(stdout)
-        if stderr:
-            print(stderr)
+        process.stdout.close()
+        return_code = process.wait()  # ← 用 wait() 而非 communicate()
+        print(f"Process exited with code: {return_code}")
     return
 
 if __name__ == "__main__":

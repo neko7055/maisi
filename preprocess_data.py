@@ -40,7 +40,7 @@ def resize_image_and_store(src_path, dest_path, new_x=256, new_y=256, new_z=64):
     resampler.SetOutputDirection(img.GetDirection())
     resampler.SetOutputOrigin(img.GetOrigin())
     resampler.SetTransform(sitk.Transform())
-    resampler.SetInterpolator(sitk.sitkLanczosWindowedSinc)  # CT
+    resampler.SetInterpolator(sitk.sitkLinear)  # CT
     resampler.SetDefaultPixelValue(-1000)
 
     resampled_img = resampler.Execute(img)

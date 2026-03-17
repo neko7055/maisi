@@ -1,3 +1,4 @@
+import math
 import torch
 
 def linear_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1e-08) :
@@ -21,7 +22,7 @@ def linear_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1
     else:
         return mu_t, d_mu_t
 
-def polynomial_interpolate(self, sources, targets, timesteps, add_noise=False) :
+def polynomial_interpolate(self, sources, targets, timesteps, add_noise=False, sigma_0=1, sigma_1=0.00001) :
     timepoints = timesteps.float() / self.num_train_timesteps
     assert sources.shape == targets.shape
     # expand timepoint to noise shape
@@ -37,22 +38,12 @@ def polynomial_interpolate(self, sources, targets, timesteps, add_noise=False) :
     mu_t = sources + f_t * (targets - sources)
     d_mu_t = df_t * (targets - sources)
     if add_noise:
-        sqrt05 = 0.7071067811865476
-        z_coef = (-54 * timepoints ** 6 +
-                  158 * timepoints ** 5 -
-                  151.5 * timepoints ** 4 +
-                  46 * timepoints ** 3 +
-                  0.5 * timepoints ** 2 +
-                  timepoints) * sqrt05
-
-        dz_coef = (-326 * timepoints ** 5 +
-                  790 * timepoints ** 4 -
-                  606 * timepoints ** 3 +
-                  138 * timepoints ** 2 +
-                  timepoints +
-                  1) * sqrt05
-
+        a = -3
+        g_t = (1-torch.exp(-a * timepoints)) / (1-math.exp(-a))
+        dg_t = (a * torch.exp(-a * timepoints)) / (1-math.exp(-a))
         noise = torch.randn_like(mu_t)
+        z_coef = sigma_0 + g_t * (sigma_1 - sigma_0)
+        dz_coef = dg_t * (sigma_1 - sigma_0)
         return mu_t + z_coef * noise, d_mu_t + dz_coef * noise
     else:
         return mu_t, d_mu_t

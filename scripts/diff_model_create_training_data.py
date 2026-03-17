@@ -16,8 +16,9 @@ import json
 import logging
 import os
 from pathlib import Path
-from concurrent.futures import ProcessPoolExecutor, Future
+from concurrent.futures import ThreadPoolExecutor, Future
 from functools import partial
+import gc
 
 import monai
 import nibabel as nib
@@ -37,20 +38,6 @@ from .utils import define_instance, dynamic_infer
 # torch.backends.cudnn.allow_tf32 = True
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
-
-def compile_model(model, shape, device):
-    model = torch.compile(
-        model,
-        mode="max-autotune",
-        fullgraph=False,
-        dynamic=False,
-        backend="inductor",
-    )
-    # warmup: 觸發編譯
-    with torch.inference_mode(), torch.autocast(device_type=device.type, enabled=True, dtype=torch.float32):
-            example_inputs = torch.randn(1, 1, *shape, device=device)
-            _ = model.encode(example_inputs)
-    return model
 
 def load_model(args: argparse.Namespace, device, logger) -> torch.nn.Module:
     # Load model to CPU first, let Accelerate handle movement
@@ -223,19 +210,19 @@ def process_batch(
         autoencoder: torch.nn.Module,
         device: torch.device,
         inferer: SlidingWindowInferer,
-        io_executor: ProcessPoolExecutor,
+        io_executor: ThreadPoolExecutor,
         logger: logging.Logger,
 ) -> list[Future]:
     infer_fn = lambda input: autoencoder.encode(input)
     all_futures = []
     for key in ("src", "tar"):
         pt_nda = batch_data[f"{key}_image"].to(device, non_blocking=True) # size: [B, C, X, Y, Z]
-        with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.float32):
-            z_mu, z_log_var = dynamic_infer(inferer, infer_fn, pt_nda)
+        with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
+            z_mu, z_sigma = dynamic_infer(inferer, infer_fn, pt_nda)
             logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
         out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1).copy() # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
         # 主動釋放 GPU tensor
-        del pt_nda, z_mu, z_log_var
+        del pt_nda, z_mu, z_sigma
         futures = [
             io_executor.submit(partial(img_save, logger=logger), a, b, c)
             for a, b, c in zip(out_ndas, batch_data[f"{key}_out_path"], batch_data[f"{key}_affine"].numpy().copy())
@@ -257,7 +244,7 @@ def diff_model_create_training_data(
             "autoencoder_tp_num_splits"
         ]
     args.autoencoder_def["save_mem"] = False
-    args.autoencoder_def["norm_float16"] = False
+    args.autoencoder_def["norm_float16"] = True
     # ── Initialize distributed ──
     local_rank, world_size, device = initialize_distributed(num_gpus=num_gpus)
     logger = setup_logging("creating training data", rk_filter=False)
@@ -273,7 +260,6 @@ def diff_model_create_training_data(
     # ── Load autoencoder ──
     autoencoder = load_model(args, device, logger)
     autoencoder.eval()
-    autoencoder = compile_model(autoencoder, args.transform_to_laten['slide_window_size'], device)
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
 
     # ── Ensure output dirs exist ──
@@ -295,15 +281,15 @@ def diff_model_create_training_data(
         roi_size=args.transform_to_laten["slide_window_size"],
         sw_batch_size=args.transform_to_laten["sw_batch_size"],
         progress=False,
-        mode="gaussian",
-        overlap=0.5,
+        mode="constant",
+        overlap=0.875,
         sw_device=device,
         device=device,
         cache_roi_weight_map=True,
     )
 
     # ── 優化: ThreadPoolExecutor 非同步 I/O ──
-    io_executor = ProcessPoolExecutor(max_workers=8)
+    io_executor = ThreadPoolExecutor(max_workers=4)
 
     # ── DataLoader 設定（參考 diff_model_infer.py）──
     cache_rate = args.transform_to_laten["cache_rate"]
@@ -389,14 +375,15 @@ def diff_model_create_training_data(
                     for fut in pending_futures:
                         fut.result()
                     pending_futures.clear()
-
+                    gc.collect()
                     if torch.cuda.is_available():
                         torch.cuda.empty_cache()
-
+            del data_loader
             # 等待本 data_type 所有殘餘 I/O 完成
             for fut in pending_futures:
                 fut.result()
             pending_futures.clear()
+            gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
@@ -410,6 +397,8 @@ def diff_model_create_training_data(
         io_executor.shutdown(wait=True)
 
     # ── Synchronize & teardown ──
+    del io_executor
+    gc.collect()
     if dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
