@@ -97,7 +97,7 @@ def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True) :
     return mu_t + z_coef * noise, d_mu_t + d_z_coef * noise
 
 def spacial_interpolate(
-    self,x0, x1, t, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001
+    self,x0, x1, t, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001, force_no_noise=False
 ):
     """
     x0, x1: [B, C, D, H, W] 或 [B, D, H, W]
@@ -163,6 +163,8 @@ def spacial_interpolate(
     # 6. 轉回空間域
     mu_t = torch.fft.irfftn(Y, s=(D, H, W), dim=(-3, -2, -1), norm="ortho")
     d_mu_t = torch.fft.irfftn(dY_dt, s=(D, H, W), dim=(-3, -2, -1), norm="ortho")
+    if force_no_noise:
+        return mu_t, d_mu_t
 
     if add_noise:
         t = t[..., None, None, None, None]

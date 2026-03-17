@@ -436,7 +436,8 @@ def evaluate(
                 def dry_run(t, x):
                     mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images,
                                                                    torch.Tensor((t,)).repeat(x.shape[0]).to(device,
-                                                                                                            non_blocking=True))
+                                                                                                            non_blocking=True),
+                                                                   force_no_noise=True)
                     return mu_t_gt, d_mu_t_gt
 
                 dt_org = next_t - t
@@ -526,23 +527,39 @@ def train_one_epoch(
         assert isinstance(noise_scheduler, RFlowScheduler)
         loss_float = 0
         with accelerator.accumulate(unet), accelerator.autocast():
-            for _ in range(time_batch_size):
-                timesteps = noise_scheduler.sample_timesteps(src_images)
-                mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps)
-                d_mu_t = _call_unet(unet,
-                                    mu_t_gt,
-                                    timesteps,
-                                    spacing_tensor,
-                                    include_body_region,
-                                    include_modality,
-                                    top_region_index_tensor,
-                                    bottom_region_index_tensor,
-                                    modality_tensor) * scale_factor + shift_factor
-                loss = loss_pt(d_mu_t.float(), d_mu_t_gt.float())
-                accelerator.backward(loss)
-                optimizer.step()
-                optimizer.zero_grad(set_to_none=True)
-                loss_float += loss.item() / time_batch_size
+            timesteps = torch.zeros((src_images.shape[0],), device=device)
+            mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps, force_no_noise=True)
+            d_mu_t = _call_unet(unet,
+                                mu_t_gt,
+                                timesteps,
+                                spacing_tensor,
+                                include_body_region,
+                                include_modality,
+                                top_region_index_tensor,
+                                bottom_region_index_tensor,
+                                modality_tensor) * scale_factor + shift_factor
+            loss = loss_pos_f(d_mu_t.float(), d_mu_t_gt.float())
+            loss_float += loss.item() / 2
+            accelerator.backward(loss)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+
+            timesteps = noise_scheduler.sample_timesteps(src_images)
+            mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps)
+            d_mu_t = _call_unet(unet,
+                                mu_t_gt,
+                                timesteps,
+                                spacing_tensor,
+                                include_body_region,
+                                include_modality,
+                                top_region_index_tensor,
+                                bottom_region_index_tensor,
+                                modality_tensor) * scale_factor + shift_factor
+            loss = loss_pt(d_mu_t.float(), d_mu_t_gt.float())
+            loss_float += loss.item() / 2
+            accelerator.backward(loss)
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
 
         loss_torch[0] += loss_float
         loss_torch[1] += 1.0
@@ -606,8 +623,8 @@ def diff_model_train(
     # mixed_precision can be "no", "fp16", "bf16".
     # It is recommended to configure this via `accelerate config` CLI or pass arg here.
     args = load_config(env_config_path, model_config_path, model_def_path)
-    accelerator = Accelerator(gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"] *\
-                                                          args.diffusion_unet_train["time_batch_size"],
+    accelerator = Accelerator(gradient_accumulation_steps=2 * args.diffusion_unet_train["gradient_accumulation_steps"] *\
+                                                              args.diffusion_unet_train["time_batch_size"],
                               step_scheduler_with_optimizer=False)
 
     logger = setup_logging("training", rk_filter=True)
