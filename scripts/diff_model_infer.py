@@ -592,7 +592,7 @@ def diff_model_infer(
                 roi_size=args.diffusion_unet_inference["slide_window_size"],
                 sw_batch_size=args.diffusion_unet_inference["sw_batch_size"],
                 progress=False,
-                mode="constant",
+                mode="gaussian",
                 overlap=0.625,
                 sw_device=device,
                 device=device,
