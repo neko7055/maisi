@@ -593,7 +593,7 @@ def diff_model_infer(
                 sw_batch_size=args.diffusion_unet_inference["sw_batch_size"],
                 progress=False,
                 mode="constant",
-                overlap=0.875,
+                overlap=0.625,
                 sw_device=device,
                 device=device,
                 cache_roi_weight_map=True,
