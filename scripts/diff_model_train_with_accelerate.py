@@ -331,7 +331,7 @@ def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer
     # optimizer = Lion(model.parameters(), lr=lr)
     # optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
-    optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    optimizer = Lookahead(optimizer=optimizer, alpha=0.5)
     return optimizer
 
 
@@ -478,13 +478,6 @@ def train_one_epoch(
         gradient_accumulation_steps: int
 ) -> torch.Tensor:
     # Handle DDP wrapping access
-    spec_loss = SpectralL1Loss().to(accelerator.device)
-    ms_ssim = MSSSIM().to(accelerator.device)
-    l1_loss = torch.nn.L1Loss().to(accelerator.device)
-    loss_pos_f = lambda y,y_gt: 0.8 * ms_ssim(y,y_gt) + \
-                                0.2 * l1_loss(y,y_gt) + \
-                                0.01 * spec_loss(y,y_gt) + \
-                                0.01 * ffl_loss_3d(y,y_gt)
     if accelerator.is_main_process:
         current_lr = optimizer.param_groups[0]["lr"]
         logger.info(f"Epoch {epoch + 1}, lr {current_lr}.")
@@ -527,39 +520,21 @@ def train_one_epoch(
         assert isinstance(noise_scheduler, RFlowScheduler)
         loss_float = 0
         with accelerator.accumulate(unet), accelerator.autocast():
-            timesteps = torch.zeros((src_images.shape[0],), device=device)
-            mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps, force_no_noise=True)
-            d_mu_t = _call_unet(unet,
-                                mu_t_gt,
-                                timesteps,
-                                spacing_tensor,
-                                include_body_region,
-                                include_modality,
-                                top_region_index_tensor,
-                                bottom_region_index_tensor,
-                                modality_tensor) * scale_factor + shift_factor
-            loss = loss_pos_f(d_mu_t.float(), d_mu_t_gt.float())
-            loss_float += loss.item() / 2
-            accelerator.backward(loss)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
-
-            timesteps = noise_scheduler.sample_timesteps(src_images)
-            mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps)
-            d_mu_t = _call_unet(unet,
-                                mu_t_gt,
-                                timesteps,
-                                spacing_tensor,
-                                include_body_region,
-                                include_modality,
-                                top_region_index_tensor,
-                                bottom_region_index_tensor,
-                                modality_tensor) * scale_factor + shift_factor
-            loss = loss_pt(d_mu_t.float(), d_mu_t_gt.float())
-            loss_float += loss.item() / 2
-            accelerator.backward(loss)
-            optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+            for _ in range(time_batch_size):
+                timesteps = noise_scheduler.sample_timesteps(src_images)
+                mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps)
+                d_mu_t = _call_unet(unet,
+                                    mu_t_gt,
+                                    timesteps,
+                                    spacing_tensor,
+                                    include_body_region,
+                                    include_modality,
+                                    top_region_index_tensor,
+                                    bottom_region_index_tensor,
+                                    modality_tensor) * scale_factor + shift_factor
+                loss = loss_pt(d_mu_t.float(), d_mu_t_gt.float())
+                loss_float += loss.item() / time_batch_size
+                accelerator.backward(loss)
 
         loss_torch[0] += loss_float
         loss_torch[1] += 1.0
@@ -580,6 +555,7 @@ def train_one_epoch(
 
         # Reduce loss for logging
     loss_torch = accelerator.reduce(loss_torch, reduction="sum")
+    optimizer.optimizer.apply_lookahead_steps()
     lr_scheduler.step()
     return loss_torch
 

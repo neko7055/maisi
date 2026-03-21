@@ -97,7 +97,7 @@ def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True) :
     return mu_t + z_coef * noise, d_mu_t + d_z_coef * noise
 
 def spacial_interpolate(
-    self,x0, x1, t, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001, force_no_noise=False
+    self,x0, x1, t,freq_a=25,freq_b=0.5, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001, force_no_noise=False
 ):
     """
     x0, x1: [B, C, D, H, W] 或 [B, D, H, W]
@@ -129,34 +129,50 @@ def spacial_interpolate(
     rho = torch.sqrt(fz ** 2 + fy ** 2 + fx ** 2)
     rho = rho / (rho.max() + eps)
 
-    # 3. 計算每個頻率對應的 a 參數
-    a = a_max * rho
-    if x0.ndim == 5:
-        a = a.unsqueeze(1)  # 擴展 channel 維度 [1, 1, D, H, Wr]
+    # 調整 rho 的形狀以支援 broadcast (補齊 batch 與 channel 維度)
+    # 若輸入是 [B, C, D, H, W]，rho 變為 [1, 1, D, H, W_r]
+    # 若輸入是 [B, D, H, W]，rho 變為 [1, D, H, W_r]
+    view_shape = [1] * (x0.ndim - 3) + [D, H, W // 2 + 1]
+    rho = rho.view(*view_shape)
 
-    t_view = t.view(B, *([1] * (F0.ndim - 1)))
+    # 3) 根據 rho 計算每個頻率點的 alpha 參數
+    alpha = torch.zeros_like(rho)
 
-    # 4. 計算插值權重 M 與 偏微分 dM/dt
-    # 為了避免 a=0 時出現 0/0 導致 NaN，使用 mask 切換計算方式
-    mask_small = a < 1e-4
+    mask_low = rho < freq_a
+    mask_mid = (rho >= freq_a) & (rho <= freq_b)
+    mask_high = rho > freq_b
 
-    # --- 正常計算 (a >= 1e-4) ---
-    exp_a = torch.exp(a)
-    exp_at = torch.exp(a * t_view)
-    denom = exp_a - 1.0
+    # f(t): rho < a
+    alpha = torch.where(mask_low, torch.full_like(alpha, -a_max), alpha)
+    # g(t): a <= rho <= b
+    alpha_mid = -a_max * (freq_b - rho) / (freq_b - freq_a)
+    alpha = torch.where(mask_mid, alpha_mid, alpha)
+    # h(t): rho > b
+    alpha_high = a_max * (rho - freq_b) / (1.0 - freq_b)
+    alpha = torch.where(mask_high, alpha_high, alpha)
 
-    M_normal = (exp_at - 1.0) / denom
-    dM_dt_normal = a * exp_at / denom
+    # 4) 準備 t
+    t_view = t.view(B, *([1] * (x0.ndim - 1)))
 
-    # --- 泰勒展開近似計算 (a < 1e-4 包含 0 頻率) ---
-    M_small = t_view + 0.5 * a * t_view * (t_view - 1.0)
-    dM_dt_small = 1.0 + a * (t_view - 0.5)
+    # 5) 計算插值權重 M 與 微分 dM_dt (包含 Taylor 展開處理 alpha 趨近 0)
+    mask_small = alpha.abs() < 1e-4
 
-    # 結合兩者
+    # --- 正常計算 (alpha 不為 0) ---
+    exp_alpha = torch.exp(-alpha)
+    exp_alphat = torch.exp(-alpha * t_view)
+    denom = 1.0 - exp_alpha
+
+    M_normal = (1.0 - exp_alphat) / denom
+    dM_dt_normal = alpha * exp_alphat / denom
+
+    # --- 泰勒展開 (alpha 趨近 0，發生在 rho 接近 b 的交界處) ---
+    M_small = t_view + 0.5 * alpha * t_view * (t_view - 1.0)
+    dM_dt_small = 1.0 + alpha * (t_view - 0.5)
+
     M = torch.where(mask_small, M_small, M_normal)
     dM_dt = torch.where(mask_small, dM_dt_small, dM_dt_normal)
 
-    # 5. 頻域混合與微分
+    # 6) 頻域組合與微分
     Y = F0 + M * dF
     dY_dt = dM_dt * dF
 
