@@ -98,7 +98,7 @@ class Lion(Optimizer):
         return loss
 
 class Lookahead(Optimizer):
-    def __init__(self, optimizer, alpha=0.5, pullback_momentum="reset"):
+    def __init__(self, optimizer, alpha=0.5, pullback_momentum="pullback"):
         if not 0.0 <= alpha <= 1.0:
             raise ValueError(f'Invalid slow update rate: {alpha}')
         assert pullback_momentum in ["reset", "pullback", "none"]
