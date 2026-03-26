@@ -599,7 +599,7 @@ def diff_model_train(
     # mixed_precision can be "no", "fp16", "bf16".
     # It is recommended to configure this via `accelerate config` CLI or pass arg here.
     args = load_config(env_config_path, model_config_path, model_def_path)
-    accelerator = Accelerator(gradient_accumulation_steps=2 * args.diffusion_unet_train["gradient_accumulation_steps"] *\
+    accelerator = Accelerator(gradient_accumulation_steps=1 * args.diffusion_unet_train["gradient_accumulation_steps"] *\
                                                               args.diffusion_unet_train["time_batch_size"],
                               step_scheduler_with_optimizer=False)
 
@@ -701,7 +701,7 @@ def diff_model_train(
     unet, optimizer, lr_scheduler = accelerator.prepare(
         unet, optimizer, lr_scheduler
     )
-
+    accelerator.wait_for_everyone()
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
         start_time = time.perf_counter()
         loss_torch = train_one_epoch(
