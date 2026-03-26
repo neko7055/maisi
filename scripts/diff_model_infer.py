@@ -15,7 +15,7 @@ import json
 import logging
 import os
 import random
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ProcessPoolExecutor
 from datetime import datetime
 from types import MethodType
 from typing import Optional
@@ -273,7 +273,7 @@ def _save_single_image(
 
 
 def save_images_async(
-        executor: ThreadPoolExecutor,
+        executor: ProcessPoolExecutor,
         datas: np.ndarray,
         out_affines: np.ndarray,
         output_names: list,
@@ -329,7 +329,7 @@ def run_inference(
         include_body_region: bool,
         include_modality: bool,
         device: torch.device,
-        io_executor: ThreadPoolExecutor,
+        io_executor: ProcessPoolExecutor,
         cleanup_interval: int = 20,
 ) -> None:
     unet.eval()
@@ -575,11 +575,11 @@ def diff_model_infer(
             obj_list[0] = datetime.now().strftime("%Y%m%d%H%M%S")
         dist.broadcast_object_list(obj_list, src=0)
         timestamp = obj_list[0]
-        dist.barrier()
+        dist.barrier(device_ids=[local_rank])
     else:
         timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
 
-    io_executor = ThreadPoolExecutor(max_workers=4)
+    io_executor = ProcessPoolExecutor(max_workers=4)
     cleanup_interval = 50
     save_dir_base = os.path.join(args.output_dir, timestamp)
 
@@ -616,7 +616,7 @@ def diff_model_infer(
                 cleanup_interval=cleanup_interval
             )
             if dist.is_initialized():
-                dist.barrier()
+                dist.barrier(device_ids=[local_rank])
     finally:
         io_executor.shutdown(wait=True)
 
@@ -624,7 +624,7 @@ def diff_model_infer(
     del train_loader, val_loader, test_loader
     gc.collect()
     if dist.is_available() and dist.is_initialized():
-        dist.barrier()
+        dist.barrier(device_ids=[local_rank])
         dist.destroy_process_group()
 
 

@@ -16,7 +16,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from concurrent.futures import ThreadPoolExecutor, Future
+from concurrent.futures import ProcessPoolExecutor, Future
 from functools import partial
 import gc
 
@@ -210,7 +210,7 @@ def process_batch(
         autoencoder: torch.nn.Module,
         device: torch.device,
         inferer: SlidingWindowInferer,
-        io_executor: ThreadPoolExecutor,
+        io_executor: ProcessPoolExecutor,
         logger: logging.Logger,
 ) -> list[Future]:
     infer_fn = lambda input: autoencoder.encode(input)
@@ -289,13 +289,15 @@ def diff_model_create_training_data(
     )
 
     # ── 優化: ThreadPoolExecutor 非同步 I/O ──
-    io_executor = ThreadPoolExecutor(max_workers=4)
+    io_executor = ProcessPoolExecutor(max_workers=4)
 
     # ── DataLoader 設定（參考 diff_model_infer.py）──
     cache_rate = args.transform_to_laten["cache_rate"]
     dl_num_workers = args.transform_to_laten["num_workers"]
     batch_size = args.transform_to_laten["batch_size"]
     cleanup_interval = 50
+    if dist.is_initialized():
+        dist.barrier(device_ids=[local_rank])
 
     try:
         for data_type in ["training", "validation", "test"]:
@@ -391,7 +393,7 @@ def diff_model_create_training_data(
                 f"[{data_type}] Finished processing on rank {local_rank}."
             )
             if dist.is_initialized():
-                dist.barrier()
+                dist.barrier(device_ids=[local_rank])
 
     finally:
         # 確保所有非同步 I/O 完成
@@ -401,7 +403,7 @@ def diff_model_create_training_data(
     del io_executor
     gc.collect()
     if dist.is_initialized():
-        dist.barrier()
+        dist.barrier(device_ids=[local_rank])
         dist.destroy_process_group()
 
     logger.info("Training data creation finished.")
