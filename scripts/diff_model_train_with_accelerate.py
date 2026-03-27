@@ -535,6 +535,8 @@ def train_one_epoch(
                 loss = loss_pt(d_mu_t.float(), d_mu_t_gt.float())
                 loss_float += loss.item() / time_batch_size
                 accelerator.backward(loss)
+                optimizer.step()
+                optimizer.zero_grad(set_to_none=True)
 
         loss_torch[0] += loss_float
         loss_torch[1] += 1.0
