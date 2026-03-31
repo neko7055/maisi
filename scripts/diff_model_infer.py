@@ -34,18 +34,13 @@ from monai.utils import set_determinism
 from tqdm import tqdm
 
 from .diff_model_setting import initialize_distributed, load_config, setup_logging
-from .utils import define_instance, dynamic_infer
+from .utils import define_instance, dynamic_infer, expand_first_conv_input_channels, build_ct_channel_params, apply_ct_channel_extend
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 
 # torch.set_float32_matmul_precision('high')
 # torch.backends.cudnn.allow_tf32 = True
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
-
-INTENSITY_A_MIN = -1000
-INTENSITY_A_MAX = 1000
-INTENSITY_B_MIN = 0
-INTENSITY_B_MAX = 1
 
 def set_random_seed(seed: Optional[int]) -> int:
     random_seed = random.randint(0, 99999) if seed is None else seed
@@ -60,7 +55,7 @@ def _load_json_field(file_path: str, key: str, convert_to_float: bool = True):
         return torch.FloatTensor(data[key])
     return data[key]
 
-def load_autoencoder(args: argparse.Namespace, device, logger) -> torch.nn.Module:
+def load_autoencoder(args: argparse.Namespace, device, logger, is_kernel_extension) -> torch.nn.Module:
     autoencoder = define_instance(args, "autoencoder_def").to(device)
     checkpoint_autoencoder = torch.load(
         args.trained_autoencoder_path, map_location=device, weights_only=False
@@ -68,14 +63,23 @@ def load_autoencoder(args: argparse.Namespace, device, logger) -> torch.nn.Modul
     if "unet_state_dict" in checkpoint_autoencoder.keys():
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
+    if is_kernel_extension:
+        expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
+        my_checkpoint_path = args.trained_ke_autoencoder_path
+        checkpoint_autoencoder = torch.load(
+            my_checkpoint_path, map_location=device, weights_only=True
+        )
+        logger.info(f"Loading expanded model weights from {my_checkpoint_path}.")
+        autoencoder.load_state_dict(checkpoint_autoencoder)
     return autoencoder.to(device)
 
 def load_models(
         args: argparse.Namespace,
         device: torch.device,
         logger: logging.Logger,
+        is_kernel_extension
 ) -> tuple:
-    autoencoder = load_autoencoder(args, device, logger)
+    autoencoder = load_autoencoder(args, device, logger, is_kernel_extension)
 
     unet = define_instance(args, "diffusion_unet_def").to(device)
     checkpoint = torch.load(
@@ -330,8 +334,19 @@ def run_inference(
         include_modality: bool,
         device: torch.device,
         io_executor: ProcessPoolExecutor,
+        is_kernel_extension: bool,
         cleanup_interval: int = 20,
 ) -> None:
+    if is_kernel_extension:
+        INTENSITY_A_MIN = -200
+        INTENSITY_A_MAX = 700
+        INTENSITY_B_MIN = 0
+        INTENSITY_B_MAX = 1
+    else:
+        INTENSITY_A_MIN = -1000
+        INTENSITY_A_MAX = 1000
+        INTENSITY_B_MIN = 0
+        INTENSITY_B_MAX = 1
     unet.eval()
     autoencoder.eval()
 
@@ -456,6 +471,7 @@ def diff_model_infer(
         args.autoencoder_def["num_splits"] = args.diffusion_unet_inference[
             "autoencoder_tp_num_splits"
         ]
+    is_kernel_extension = args.trained_ke_autoencoder_path is not None
     args.autoencoder_def["save_mem"] = False
     args.autoencoder_def["norm_float16"] = True
     local_rank, world_size, device = initialize_distributed(num_gpus)
@@ -470,7 +486,7 @@ def diff_model_infer(
     )
 
     autoencoder, unet, shift_factor, scale_factor = load_models(
-        args, device, logger
+        args, device, logger, is_kernel_extension
     )
     # ── Noise scheduler ──
     noise_scheduler = define_instance(args, "noise_scheduler")
@@ -593,7 +609,7 @@ def diff_model_infer(
                 sw_batch_size=args.diffusion_unet_inference["sw_batch_size"],
                 progress=False,
                 mode="gaussian",
-                overlap=0.625,
+                overlap=0.5,
                 sw_device=device,
                 device=device,
                 cache_roi_weight_map=True,
@@ -613,6 +629,7 @@ def diff_model_infer(
                 include_modality=include_modality,
                 device=device,
                 io_executor=io_executor,
+                is_kernel_extension=is_kernel_extension,
                 cleanup_interval=cleanup_interval
             )
             if dist.is_initialized():

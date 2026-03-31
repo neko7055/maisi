@@ -32,14 +32,14 @@ from monai.inferers.inferer import SlidingWindowInferer
 
 from .diff_model_setting import initialize_distributed, load_config, setup_logging
 from .transforms import define_fixed_intensity_transform, SUPPORT_MODALITIES
-from .utils import define_instance, dynamic_infer
+from .utils import define_instance, dynamic_infer, expand_first_conv_input_channels, build_ct_channel_params, apply_ct_channel_extend
 
 # torch.set_float32_matmul_precision('high')
 # torch.backends.cudnn.allow_tf32 = True
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
 
-def load_model(args: argparse.Namespace, device, logger) -> torch.nn.Module:
+def load_model(args: argparse.Namespace, device, logger, is_kernel_extension) -> torch.nn.Module:
     # Load model to CPU first, let Accelerate handle movement
 
     autoencoder = define_instance(args, "autoencoder_def").to(device)
@@ -49,13 +49,22 @@ def load_model(args: argparse.Namespace, device, logger) -> torch.nn.Module:
     if "unet_state_dict" in checkpoint_autoencoder.keys():
         checkpoint_autoencoder = checkpoint_autoencoder["unet_state_dict"]
     autoencoder.load_state_dict(checkpoint_autoencoder)
+    if is_kernel_extension:
+        expand_first_conv_input_channels(autoencoder.encoder.blocks[0].conv, k=18)
+        my_checkpoint_path = args.trained_ke_autoencoder_path
+        checkpoint_autoencoder = torch.load(
+            my_checkpoint_path, map_location=device, weights_only=True
+        )
+        logger.info(f"Loading expanded model weights from {my_checkpoint_path}.")
+        autoencoder.load_state_dict(checkpoint_autoencoder)
 
     return autoencoder.to(device)
 
 def create_data_transforms(data_type,
                            data_base_dir,
                            embedding_base_dir,
-                           modality: str = "unknown") -> Compose:
+                           is_kernel_extension: bool,
+                           modality: str = "unknown",) -> Compose:
     keys = ["src_image", "tar_image"]
 
     # 正規化 modality 字串
@@ -64,7 +73,7 @@ def create_data_transforms(data_type,
     if "ct" in modality:
         modality = "ct"
 
-    if modality in SUPPORT_MODALITIES:
+    if modality in SUPPORT_MODALITIES and (not is_kernel_extension):
         intensity_transforms = define_fixed_intensity_transform(
             modality=modality, image_keys=keys
         )
@@ -212,12 +221,18 @@ def process_batch(
         inferer: SlidingWindowInferer,
         io_executor: ProcessPoolExecutor,
         logger: logging.Logger,
+        is_kernel_extension: bool
 ) -> list[Future]:
-    infer_fn = lambda input: autoencoder.encode(input)
+    if is_kernel_extension:
+        a_t, b_t = build_ct_channel_params(A=-200, B=700, levels=[1, 3, 5], ks=[4, 5])
+        et_channel = lambda x: apply_ct_channel_extend(x, a_t, b_t)
+        infer_fn = lambda input: autoencoder.encode(et_channel(input))
+    else:
+        infer_fn = lambda input: autoencoder.encode(input)
     all_futures = []
     for key in ("src", "tar"):
         pt_nda = batch_data[f"{key}_image"].to(device, non_blocking=True) # size: [B, C, X, Y, Z]
-        with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.bfloat16):
+        with torch.amp.autocast(device_type=device.type, enabled=True, dtype=torch.float16):
             z_mu, z_sigma = dynamic_infer(inferer, infer_fn, pt_nda)
             logger.info(f"z_mu: {z_mu.size()}, {z_mu.dtype}")
         out_ndas = z_mu.float().cpu().numpy().transpose(0, 2, 3, 4, 1).copy() # size: [B, C, X, Y, Z] -> [B, X, Y, Z, C]
@@ -243,6 +258,7 @@ def diff_model_create_training_data(
         args.autoencoder_def["num_splits"] = args.transform_to_laten[
             "autoencoder_tp_num_splits"
         ]
+    is_kernel_extension = args.trained_ke_autoencoder_path is not None
     args.autoencoder_def["save_mem"] = False
     args.autoencoder_def["norm_float16"] = True
     # ── Initialize distributed ──
@@ -258,7 +274,7 @@ def diff_model_create_training_data(
     )
 
     # ── Load autoencoder ──
-    autoencoder = load_model(args, device, logger)
+    autoencoder = load_model(args, device, logger, is_kernel_extension)
     autoencoder.eval()
     logger.info(f"Autoencoder loaded from {args.trained_autoencoder_path}")
 
@@ -282,7 +298,7 @@ def diff_model_create_training_data(
         sw_batch_size=args.transform_to_laten["sw_batch_size"],
         progress=False,
         mode="gaussian",
-        overlap=0.625,
+        overlap=0.5,
         sw_device=device,
         device=device,
         cache_roi_weight_map=True,
@@ -309,6 +325,7 @@ def diff_model_create_training_data(
             data_transforms = create_data_transforms(data_type=data_type,
                                                      data_base_dir=args.data_base_dir,
                                                      embedding_base_dir=args.embedding_base_dir,
+                                                     is_kernel_extension=is_kernel_extension,
                                                      modality=global_modality)
 
             # ── 優化: 預先過濾已存在的 embedding ──
@@ -369,6 +386,7 @@ def diff_model_create_training_data(
                     inferer,
                     io_executor,
                     logger,
+                    is_kernel_extension,
                 )
                 pending_futures.extend(futures)
 

@@ -39,6 +39,7 @@ env_config_out["model_filename"] = "my_train_rflow.pt"
 env_config_out["output_dir"] = os.path.join(env_config_out["work_dir"], "predictions")
 env_config_out["output_prefix"] = "unet_3d"
 env_config_out["trained_autoencoder_path"] = os.path.join(env_config_out["model_dir"], "autoencoder_v1.pt")
+env_config_out["trained_ke_autoencoder_path"] = None
 env_config_out["existing_ckpt_filepath"] = os.path.join(env_config_out["model_dir"], "diff_unet_3d_rflow-ct.pt")
 env_config_out["modality_mapping_path"] = os.path.join(env_config_out["work_dir"], "configs", "modality_mapping.json")
 env_config_out["dinov3_repo_path"] = os.path.join(env_config_out["work_dir"], "dinov3")

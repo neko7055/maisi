@@ -27,7 +27,7 @@ from monai.transforms import Compose
 from .optimizer import Lion, Lookahead
 from .diff_model_setting import load_config, setup_logging
 from .ssim import _ssim_3D
-from .utils import define_instance
+from .utils import define_instance, expand_first_conv_input_channels, build_ct_channel_params, apply_ct_channel_extend
 from .transforms import VAE_Transform
 
 # torch.set_float32_matmul_precision('high')
@@ -136,51 +136,6 @@ def prepare_data(
                       pin_memory=True,
                       persistent_workers=use_persistent,)
 
-def expand_first_conv_input_channels(model: torch.nn.Module, k: int):
-    """
-    将模型第一个卷积层 (self.conv) 的 input channel 复制 k 倍。
-    新权重通过重复原始权重 k 次来初始化。
-    """
-    old_conv = model.conv
-    in_channels = old_conv.in_channels * k
-    out_channels = old_conv.out_channels
-
-    # 判断卷积类型（2D 或 3D）
-    if isinstance(old_conv, torch.nn.Conv3d):
-        new_conv = torch.nn.Conv3d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            dilation=old_conv.dilation,
-            groups=old_conv.groups,
-            bias=old_conv.bias is not None,
-            padding_mode=old_conv.padding_mode,
-        )
-    elif isinstance(old_conv, torch.nn.Conv2d):
-        new_conv = torch.nn.Conv2d(
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=old_conv.kernel_size,
-            stride=old_conv.stride,
-            padding=old_conv.padding,
-            dilation=old_conv.dilation,
-            groups=old_conv.groups,
-            bias=old_conv.bias is not None,
-            padding_mode=old_conv.padding_mode,
-        )
-    else:
-        raise TypeError(f"Unsupported conv type: {type(old_conv)}")
-
-    # 将原始权重沿 input channel 维度 (dim=1) 重复 k 次，并除以 k 保持输出尺度一致
-    with torch.no_grad():
-        new_conv.weight.copy_(old_conv.weight.repeat(1, k, *([1] * (old_conv.weight.dim() - 2))) / k)
-        if old_conv.bias is not None:
-            new_conv.bias.copy_(old_conv.bias)
-
-    model.conv = new_conv
-
 def load_model(args: argparse.Namespace, accelerator: Accelerator, logger) -> torch.nn.Module:
     # Load model to CPU first, let Accelerate handle movement
 
@@ -211,56 +166,13 @@ def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer
     #optimizer = Lion(model.parameters(), lr=lr)
     #optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
-    optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
+    optimizer = Lookahead(optimizer=optimizer, alpha=0.5)
     return optimizer
 
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int):
     #return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
     return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-7)
-
-def build_ct_channel_params(A, B, levels=None, ks=None):
-    """预计算所有 (a, b) 参数张量，只需调用一次。"""
-    if ks is None:
-        ks = [5]
-    if levels is None:
-        levels = [1, 3, 5]
-
-    a_list, b_list = [], []
-    for k_val in ks:
-        for l in levels:
-            step = (B - A) / l
-            for i in range(l):
-                s = A + step * i
-                e = s + step
-                a_list.append(k_val / (e - s))
-                b_list.append(-k_val * (e + s) / (2.0 * (e - s)))
-
-    # (N, 1, 1, 1) 用于与 (1, H, W, D) 广播
-    a_t = torch.tensor(a_list, dtype=torch.float64).reshape(-1, 1, 1, 1)
-    b_t = torch.tensor(b_list, dtype=torch.float64).reshape(-1, 1, 1, 1)
-    return a_t, b_t
-
-def apply_ct_channel_extend(x, a_t, b_t):
-    """利用预计算的参数张量，广播计算 sigmoid 扩展通道。"""
-    from monai.data import MetaTensor
-
-    meta = x.meta if isinstance(x, MetaTensor) else None
-
-    # 参数移到与 x 相同的设备
-    device = x.device if isinstance(x, torch.Tensor) else torch.device("cpu")
-    a_t = a_t.to(device=device)
-    b_t = b_t.to(device=device)
-
-    # float64 计算避免溢出，广播: (N,1,1,1) * (1,H,W,D) -> (N,H,W,D)
-    x_64 = x.to(dtype=torch.float64)
-    z = -(a_t * x_64 + b_t)
-    result = torch.sigmoid(z).to(dtype=x.dtype)
-
-    if meta is not None:
-        result = MetaTensor(result, meta=meta)
-
-    return result
 
 def train_one_epoch(
         epoch: int,
