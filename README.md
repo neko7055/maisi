@@ -18,8 +18,9 @@ uv sync
 [project]
 name = "maisi"
 version = "0.1.0"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
+  "parameterized",
   "torch",
   "torchvision",
   "numpy",
@@ -27,20 +28,22 @@ dependencies = [
   "wheel-stub",
   "simpleitk",
   "nibabel",
+  "ultralytics-thop",
   "accelerate",
   "torchmetrics",
   "transformers[torch]",
   "monai[all]",
+  "focal-frequency-loss"
 ]
 
 [[tool.uv.index]]
-name = "pytorch-cu130"
-url = "https://download.pytorch.org/whl/cu130"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
-torch = { index = "pytorch-cu130" }
-torchvision = { index = "pytorch-cu130" }
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
 ```
 
 # Usage
