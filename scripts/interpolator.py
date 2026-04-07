@@ -97,7 +97,7 @@ def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True) :
     return mu_t + z_coef * noise, d_mu_t + d_z_coef * noise
 
 def spacial_interpolate(
-    self,x0, x1, t,freq_a=25,freq_b=0.5, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001, force_no_noise=False
+    self,x0, x1, t,freq_a=0.25,freq_b=0.5, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001, force_no_noise=False
 ):
     """
     x0, x1: [B, C, D, H, W] 或 [B, D, H, W]
