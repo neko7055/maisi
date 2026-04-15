@@ -519,9 +519,9 @@ def train_one_epoch(
         # Logic remains same
         assert isinstance(noise_scheduler, RFlowScheduler)
         loss_float = 0
-        with accelerator.accumulate(unet), accelerator.autocast():
-            for _ in range(time_batch_size):
-                timesteps = noise_scheduler.sample_timesteps(src_images)
+        for _ in range(time_batch_size):
+            timesteps = noise_scheduler.sample_timesteps(src_images)
+            with accelerator.accumulate(unet), accelerator.autocast():
                 mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps)
                 d_mu_t = _call_unet(unet,
                                     mu_t_gt,
