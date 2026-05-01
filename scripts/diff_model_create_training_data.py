@@ -26,7 +26,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from tqdm import tqdm
-from monai.data import DataLoader, partition_dataset, CacheDataset
+from monai.data import DataLoader, partition_dataset
 from monai.transforms import Compose
 from monai.inferers.inferer import SlidingWindowInferer
 
