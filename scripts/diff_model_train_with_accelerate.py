@@ -171,9 +171,11 @@ def prepare_data(
         cache_rate: float,
         num_workers: int = 2,
         batch_size: int = 1,
+        gradient_accumulation_steps: int = 1,
         include_body_region: bool = False,
         include_modality: bool = True,
-        modality_mapping: dict = None
+        modality_mapping: dict = None,
+        for_training: bool = False,
 ) -> DataLoader:
     def _load_nifti(filepath: str):
         img = nib.load(filepath)
@@ -246,14 +248,23 @@ def prepare_data(
         ]
     train_transforms = Compose(train_transforms_list)
 
-    train_ds = monai.data.CacheDataset(
-        data=train_files, transform=train_transforms, cache_rate=cache_rate, num_workers=num_workers
+    train_ds = monai.data.Dataset(
+        data=train_files, transform=train_transforms#, cache_rate=cache_rate, num_workers=num_workers
     )
     use_persistent = num_workers > 0
+    if for_training:
+        sampler = torch.utils.data.RandomSampler(
+                            train_ds,
+                            replacement=True,
+                            num_samples=20 * batch_size * gradient_accumulation_steps
+                        )
+    else:
+        sampler = torch.utils.data.SequentialSampler(train_ds)
     return DataLoader(train_ds,
                       num_workers=num_workers,
                       batch_size=batch_size,
-                      shuffle=True,
+                      sampler=sampler,
+                      prefetch_factor=8,
                       pin_memory=True,
                       persistent_workers=use_persistent, )
 
@@ -278,16 +289,15 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
-    # optimizer = Lion(model.parameters(), lr=lr)
+    optimizer = Lion(model.parameters(), lr=lr)
     # optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
-    optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
-    optimizer = Lookahead(optimizer=optimizer, alpha=0.5)
+    # optimizer = torch.optim.Adam(model.parameters(), lr=lr, foreach=True)
+    # optimizer = Lookahead(optimizer=optimizer, alpha=0.5)
     return optimizer
 
 
 def create_lr_scheduler(optimizer: torch.optim.Optimizer, total_steps: int):
-    # return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=25, eta_min=1e-7)
-    return torch.optim.lr_scheduler.PolynomialLR(optimizer, total_iters=total_steps, power=2.0)
+    return torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(optimizer, T_0=20)
 
 
 def _call_unet(
@@ -500,11 +510,10 @@ def train_one_epoch(
                     current_lr
                 )
             )
+            lr_scheduler.step()
 
         # Reduce loss for logging
     loss_torch = accelerator.reduce(loss_torch, reduction="sum")
-    optimizer.optimizer.apply_lookahead_steps()
-    lr_scheduler.step()
     return loss_torch
 
 
@@ -561,7 +570,7 @@ def diff_model_train(
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(rk5_step,
                                       noise_scheduler)  # Option: euler_step, midpoint_step, rk4_step, rk5_step
-    noise_scheduler.add_noise = MethodType(partial(spacial_interpolate, add_noise=True),
+    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False),
                                            noise_scheduler)  # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate, polynomial_interpolate
 
     include_body_region = unet.include_top_region_index_input
@@ -633,9 +642,9 @@ def diff_model_train(
     optimizer = create_optimizer(unet, args.diffusion_unet_train["lr"])
 
     # Calculate steps based on local dataset size (approximate)
-    total_steps = args.diffusion_unet_train["n_epochs"]
+    total_steps = args.diffusion_unet_train["n_epochs"] * 20
     lr_scheduler = create_lr_scheduler(optimizer, total_steps)
-    loss_pt = MSXSigmoidLoss().to(accelerator.device)
+    loss_pt = torch.nn.L1Loss().to(accelerator.device)
 
     # Prepare everything with Accelerate
     # NOTE: We do NOT pass train_loader here because we manually partitioned the dataset
