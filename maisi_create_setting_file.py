@@ -82,7 +82,7 @@ model_config_out["diffusion_unet_train"]["lr"] = 0.0001
 model_config_out["diffusion_unet_train"]["n_epochs"] = 125
 model_config_out["diffusion_unet_train"]["num_validation_steps"] = 1
 model_config_out["diffusion_unet_train"]["validation_batch_size"] = 8
-odel_config_out["diffusion_unet_train"]["validation_infer_size"] = [64, 64, 64]
+model_config_out["diffusion_unet_train"]["validation_infer_size"] = [64, 64, 64]
 
 model_config_out["diffusion_unet_inference"] = OrderedDict()
 model_config_out["diffusion_unet_inference"]["infer_size"] = [64, 64, 64]
