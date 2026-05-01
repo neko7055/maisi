@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch.optim import Optimizer
 from collections import defaultdict
@@ -10,11 +12,12 @@ class Lion(Optimizer):
 
     def __init__(
         self,
-        params: List[torch.Tensor],
+        params,
         lr: float = 1e-4,
         *,
         betas: Tuple[float, float] = (0.9, 0.99),
         weight_decay: float = 0.0,
+        sigma: float = 0.01,
     ):
         """
         Initialize the Optimizer.
@@ -51,6 +54,7 @@ class Lion(Optimizer):
                 "weight_decay": weight_decay,
             },
         )
+        self.sigma = sigma
 
     @torch.no_grad()
     def step(self, closure: callable = None) -> float | None:
@@ -89,7 +93,10 @@ class Lion(Optimizer):
                 beta1, beta2 = group["betas"]
 
                 # Update the weights.
-                update = exponential_average * beta1 + gradient * (1 - beta1)
+                update = exponential_average * beta1 + \
+                         gradient * (1 - beta1) #+ \
+                         #self.sigma * math.sqrt((1 - beta1)) * torch.randn_like(gradient)
+                params.add_(torch.randn_like(update), alpha=self.sigma*math.sqrt(group["lr"]))
                 params.add_(update.sign_(), alpha=-group["lr"])
 
                 # Update the exponential average.
