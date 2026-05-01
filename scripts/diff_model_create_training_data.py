@@ -187,11 +187,9 @@ def prepare_data(
         num_workers: int = 2,
         batch_size: int = 1,
 ) -> DataLoader:
-    dataset = CacheDataset(
+    dataset = monai.data.Dataset(
         data=file_list,
         transform=transforms,
-        cache_rate=cache_rate,
-        num_workers=num_workers,
     )
 
     use_persistent = num_workers > 0
@@ -199,7 +197,8 @@ def prepare_data(
         dataset,
         num_workers=num_workers,
         batch_size=batch_size,
-        shuffle=False,
+        sampler=torch.utils.data.SequentialSampler(dataset),
+        prefetch_factor=8,
         pin_memory=True,
         persistent_workers=use_persistent,
     )
