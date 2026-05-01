@@ -277,56 +277,6 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
     return unet
 
 
-def calculate_scale_factor(train_files, accelerator: Accelerator, logger: logging.Logger) -> tuple[
-    torch.Tensor, torch.Tensor]:
-    def _calculate(tensor_list):
-        if len(tensor_list) > 0:
-            all_data = torch.stack(tensor_list, dim=0).to(accelerator.device, dtype=torch.float64)  # [B, C, D, H, W]
-            #mean = torch.mean(all_data, dim=0, keepdim=True)
-            #std = torch.std(all_data, dim=0, keepdim=True, correction=0)
-            shift_factor = torch.zeros(*all_data.shape[2:], device=accelerator.device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)#mean  # median_data
-            scale_factor = torch.ones(*all_data.shape[2:], device=accelerator.device, dtype=torch.float32).unsqueeze(0).unsqueeze(0)#1 / std  # mad
-        else:
-            # Fallback if a process has no data (unlikely with proper partition)
-            scale_factor = torch.tensor(1.0, device=accelerator.device, dtype=torch.float32)
-            shift_factor = torch.tensor(0.0, device=accelerator.device, dtype=torch.float32)
-        return shift_factor, scale_factor
-
-    # (Calculates scale factor locally then syncs across processes)
-    data_transforms_list = [
-        monai.transforms.LoadImaged(keys=["src_image", "tar_image"]),
-        monai.transforms.EnsureChannelFirstd(keys=["src_image", "tar_image"], channel_dim=-1),
-        monai.transforms.EnsureTyped(keys=["src_image", "tar_image"], dtype=torch.float32)
-    ]
-    data_transforms = Compose(data_transforms_list)
-    tensor_list = []
-
-    # Only process local files
-    for d in train_files:
-        d_transformed = data_transforms(d)
-        tensor_list.append(d_transformed["tar_image"] - d_transformed["src_image"])
-
-    shift_factor, scale_factor = _calculate(tensor_list)
-
-    shift_factor = accelerator.reduce(shift_factor, reduction="mean").float()
-    scale_factor = accelerator.reduce(scale_factor, reduction="mean").float()
-
-    # replace inf/nan with finite numbers to avoid issues in training
-    scale_factor = torch.where(torch.isfinite(scale_factor), scale_factor,
-                               torch.tensor(1.0, device=scale_factor.device, dtype=torch.float32))
-    shift_factor = torch.where(torch.isfinite(shift_factor), shift_factor,
-                               torch.tensor(0.0, device=shift_factor.device, dtype=torch.float32))
-
-    logger.info(f"Scale factor is valid -> {torch.isfinite(scale_factor).all().item()}.")
-    logger.info(f"Scale factor shape -> {scale_factor.shape}.")
-    logger.info(f"scale_factor -> {scale_factor}.")
-    logger.info(f"Shift factor is valid -> {torch.isfinite(shift_factor).all().item()}.")
-    logger.info(f"Shift factor shape -> {shift_factor.shape}.")
-    logger.info(f"shift_factor -> {shift_factor}.")
-
-    return shift_factor, scale_factor
-
-
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
     # optimizer = Lion(model.parameters(), lr=lr)
     # optimizer = Lookahead(optimizer=optimizer, k=5, alpha=0.5)
@@ -367,8 +317,6 @@ def _call_unet(
 def evaluate(
         unet: torch.nn.Module,
         data_loader: DataLoader,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
         noise_scheduler: torch.nn.Module,
         accelerator: Accelerator,
         logger: logging.Logger,
@@ -431,7 +379,7 @@ def evaluate(
                                       include_modality,
                                       top_region_index_tensor,
                                       bottom_region_index_tensor,
-                                      modality_tensor) * scale_factor + shift_factor
+                                      modality_tensor)
 
                 def dry_run(t, x):
                     mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images,
@@ -467,8 +415,6 @@ def train_one_epoch(
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.PolynomialLR,
         loss_pt: torch.nn.Module,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
         noise_scheduler: torch.nn.Module,
         accelerator: Accelerator,
         logger: logging.Logger,
@@ -531,7 +477,7 @@ def train_one_epoch(
                                     include_modality,
                                     top_region_index_tensor,
                                     bottom_region_index_tensor,
-                                    modality_tensor) * scale_factor + shift_factor
+                                    modality_tensor)
                 loss = loss_pt(d_mu_t.float(), d_mu_t_gt.float())
                 loss_float += loss.item() / time_batch_size
                 accelerator.backward(loss)
@@ -567,8 +513,6 @@ def save_checkpoint(
         unet: torch.nn.Module,
         loss_torch_epoch: float,
         num_train_timesteps: int,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
         ckpt_folder: str,
         args: argparse.Namespace,
         accelerator: Accelerator
@@ -586,8 +530,6 @@ def save_checkpoint(
                 "epoch": epoch + 1,
                 "loss": loss_torch_epoch,
                 "num_train_timesteps": num_train_timesteps,
-                "shift_factor": shift_factor,
-                "scale_factor": scale_factor,
                 "unet_state_dict": unwrapped_unet.state_dict(),
             },
             f"{ckpt_folder}/{args.model_filename}",
@@ -662,10 +604,9 @@ def diff_model_train(
     )[accelerator.process_index]
 
     # Calculate scale factor locally then sync
-    shift_factor, scale_factor = calculate_scale_factor(train_files, accelerator, logger)
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_train["num_validation_steps"],
-        input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
+        input_img_size_numel=torch.prod(torch.tensor(args.diffusion_unet_train["validation_infer_size"])),
     )
 
     # Create DataLoader with local subset
@@ -713,8 +654,6 @@ def diff_model_train(
             optimizer,
             lr_scheduler,
             loss_pt,
-            shift_factor,
-            scale_factor,
             noise_scheduler,
             accelerator,
             logger,
@@ -740,8 +679,6 @@ def diff_model_train(
             eval_loss_torch = evaluate(
                 unet,
                 val_loader,
-                shift_factor,
-                scale_factor,
                 noise_scheduler,
                 accelerator,
                 logger,
@@ -763,8 +700,6 @@ def diff_model_train(
             unet,
             loss_torch_epoch,
             args.noise_scheduler["num_train_timesteps"],
-            shift_factor,
-            scale_factor,
             args.model_dir,
             args,
             accelerator

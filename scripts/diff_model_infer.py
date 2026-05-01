@@ -91,13 +91,7 @@ def load_models(
     unet.eval()
     logger.info(f"checkpoints {args.model_dir}/{args.model_filename} loaded.")
 
-    shift_factor = checkpoint["shift_factor"]
-    scale_factor = checkpoint["scale_factor"]
-
-    logger.info(f"shift_factor -> {shift_factor}.")
-    logger.info(f"scale_factor -> {scale_factor}.")
-
-    return autoencoder, unet, shift_factor, scale_factor
+    return autoencoder, unet
 
 def load_filenames(data_list_path: str, mode: str) -> list:
     with open(data_list_path, "r") as file:
@@ -325,8 +319,6 @@ def run_inference(
         unet: torch.nn.Module,
         autoencoder: torch.nn.Module,
         data_loader: DataLoader,
-        shift_factor: torch.Tensor,
-        scale_factor: torch.Tensor,
         noise_scheduler: RFlowScheduler,
         inferer: SlidingWindowInferer,
         logger: logging.Logger,
@@ -397,7 +389,7 @@ def run_inference(
                               include_modality,
                               top_region_index_tensor,
                               bottom_region_index_tensor,
-                              modality_tensor)  * scale_factor + shift_factor
+                              modality_tensor)
 
         with torch.inference_mode(), torch.autocast(
                 device_type=device.type, enabled=True, dtype=torch.bfloat16
@@ -485,7 +477,7 @@ def diff_model_infer(
         f"Using {device} of {world_size} with random seed: {random_seed}"
     )
 
-    autoencoder, unet, shift_factor, scale_factor = load_models(
+    autoencoder, unet = load_models(
         args, device, logger, is_kernel_extension
     )
     # ── Noise scheduler ──
@@ -493,7 +485,7 @@ def diff_model_infer(
     noise_scheduler.step = MethodType(rk5_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
-        input_img_size_numel=torch.prod(torch.tensor(scale_factor.shape[2:])),
+        input_img_size_numel=torch.prod(torch.tensor(args.diffusion_unet_inference["infer_size"])),
     )
 
     include_body_region = unet.include_top_region_index_input
@@ -620,8 +612,6 @@ def diff_model_infer(
                 unet=unet,
                 autoencoder=autoencoder,
                 data_loader=loader,
-                shift_factor=shift_factor,
-                scale_factor=scale_factor,
                 noise_scheduler=noise_scheduler,
                 inferer=inferer,
                 logger=logger,
