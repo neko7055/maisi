@@ -236,11 +236,9 @@ def prepare_data(
             ),
         ]
 
-    train_ds = monai.data.CacheDataset(
+    train_ds = monai.data.Dataset(
         data=train_files,
         transform=Compose(transforms_list),
-        cache_rate=cache_rate,
-        num_workers=num_workers,
     )
 
     use_persistent = num_workers > 0
@@ -248,7 +246,8 @@ def prepare_data(
         train_ds,
         num_workers=num_workers,
         batch_size=batch_size,
-        shuffle=False,
+        sampler=torch.utils.data.SequentialSampler(train_ds),
+        prefetch_factor=8,
         pin_memory=True,
         persistent_workers=use_persistent,
     )
