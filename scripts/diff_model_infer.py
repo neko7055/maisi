@@ -397,7 +397,7 @@ def run_inference(
                 mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
 
         with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.bfloat16
+                device_type=device.type, enabled=True, dtype=torch.float16
         ):
             predict_images = dynamic_infer(inferer, autoencoder.decode, mu_t)
 
