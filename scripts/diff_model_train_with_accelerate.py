@@ -39,86 +39,6 @@ from .utils import define_instance
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
 
-def cosine_similarity_loss(y_t, y_prime_t):
-    y_t = torch.flatten(y_t, start_dim=1)  # Flatten all dimensions except batch
-    y_prime_t = torch.flatten(y_prime_t, start_dim=1)
-    cos_sim = torch.nn.functional.cosine_similarity(y_t, y_prime_t, dim=1)
-    return 1 - torch.mean(cos_sim)
-
-def x_sigmoid_loss(y_t, y_prime_t):
-    ey_t = y_t - y_prime_t
-    return torch.mean(ey_t * torch.tanh(ey_t / 2))
-
-
-class XSigmoidLoss(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, y_t, y_prime_t):
-        return x_sigmoid_loss(y_t, y_prime_t)
-
-
-class MSXSigmoidLoss(torch.nn.Module):
-    def __init__(self, weights=None):
-        super().__init__()
-        if weights is None:
-            weights = [4 / 7, 2 / 7, 1 / 7]
-        self.weights = weights
-
-    def forward(self, y_t, y_prime_t):
-        loss = self.weights[0] * x_sigmoid_loss(y_t, y_prime_t)
-        for w in self.weights[1:]:
-            y_t = torch.nn.functional.avg_pool3d(y_t, kernel_size=2, stride=2)
-            y_prime_t = torch.nn.functional.avg_pool3d(y_prime_t, kernel_size=2, stride=2)
-            loss += w * x_sigmoid_loss(y_t, y_prime_t)
-        return loss
-
-
-class MSSSIM(torch.nn.Module):
-    def __init__(self, weights=None):
-        super().__init__()
-        if weights is None:
-            weights = [4 / 7, 2 / 7, 1 / 7]
-        self.weights = weights
-
-    def forward(self, y_t, y_prime_t):
-        loss = self.weights[0] * (1 - _ssim_3D(y_t, y_prime_t, 3)) / 2
-        for w in self.weights[1:]:
-            y_t = torch.nn.functional.avg_pool3d(y_t, kernel_size=2, stride=2)
-            y_prime_t = torch.nn.functional.avg_pool3d(y_prime_t, kernel_size=2, stride=2)
-            loss += w * (1 - _ssim_3D(y_t, y_prime_t, 3)) / 2
-        return loss
-
-
-def ffl_loss_3d(pred, target):
-    ffl_loss_fn = FFL(loss_weight=1.0, alpha=1.0)
-    B, C, H, W, D = pred.shape
-    pred = pred.permute(0, 4, 1, 2, 3)
-    target = target.permute(0, 4, 1, 2, 3)
-
-    pred_2d = pred.reshape(-1, C, H, W)
-    target_2d = target.reshape(-1, C, H, W)
-
-    loss = ffl_loss_fn(pred_2d, target_2d)
-    return loss
-
-
-class SpectralL1Loss(torch.nn.Module):
-    def __init__(self, dim=3):
-        super().__init__()
-        self.fft_dims = (-2, -1) if dim == 2 else (-3, -2, -1)
-
-    def forward(self, pred, target):
-        pred_fft = torch.fft.rfftn(pred, dim=self.fft_dims, norm="ortho")
-        target_fft = torch.fft.rfftn(target, dim=self.fft_dims, norm="ortho")
-
-        loss_real = torch.nn.functional.l1_loss(pred_fft.real, target_fft.real)
-        loss_imag = torch.nn.functional.l1_loss(pred_fft.imag, target_fft.imag)
-
-        loss_spectral = loss_real + loss_imag
-
-        return loss_spectral
-
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
     mask_ct = torch.logical_and((modality_tensor < 8), (modality_tensor >= 2))
@@ -624,14 +544,16 @@ def diff_model_train(
         cache_rate=args.diffusion_unet_train["cache_rate"],
         num_workers=args.diffusion_unet_train["num_workers"],
         batch_size=args.diffusion_unet_train["batch_size"],
+        gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"],
         include_body_region=include_body_region,
         include_modality=include_modality,
-        modality_mapping=args.modality_mapping
+        modality_mapping=args.modality_mapping,
+        for_training=True,
     )
 
     val_loader = prepare_data(
         val_files,
-        cache_rate=args.diffusion_unet_train["cache_rate"],
+        cache_rate=0,
         num_workers=args.diffusion_unet_train["num_workers"],
         batch_size=args.diffusion_unet_train["validation_batch_size"],
         include_body_region=include_body_region,
@@ -704,15 +626,16 @@ def diff_model_train(
                 logger.info(
                     f"epoch {epoch + 1} average mse loss on validation set: {formatted}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
             accelerator.free_memory()
-        save_checkpoint(
-            epoch,
-            unet,
-            loss_torch_epoch,
-            args.noise_scheduler["num_train_timesteps"],
-            args.model_dir,
-            args,
-            accelerator
-        )
+        if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
+            save_checkpoint(
+                epoch,
+                unet,
+                loss_torch_epoch,
+                args.noise_scheduler["num_train_timesteps"],
+                args.model_dir,
+                args,
+                accelerator
+            )
 
     logger.info("Training finished")
     del train_loader, val_loader, unet, optimizer, lr_scheduler, noise_scheduler
