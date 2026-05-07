@@ -1,7 +1,7 @@
 import math
 import torch
 
-def linear_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1e-08) :
+def linear_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1e-08, force_no_noise=False) :
     timepoints = timesteps.float() / self.num_train_timesteps
     assert sources.shape == targets.shape
     # expand timepoint to noise shape
@@ -74,7 +74,7 @@ def triangular_interpolate(self, sources, targets, timesteps, add_noise=False, e
     else:
         return mu_t, d_mu_t
 
-def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True) :
+def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True, force_no_noise=False) :
     assert add_noise, "enc-dec interpolation requires noise to be added, yet add_noise is set to False"
     timepoints = timesteps.float() / self.num_train_timesteps
     assert sources.shape == targets.shape
@@ -94,6 +94,8 @@ def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True) :
     mu_t = mu_coef * images
     d_mu_t = d_mu_coef * images
     noise = torch.randn_like(mu_t)
+    if force_no_noise:
+        return mu_t, d_mu_t
     return mu_t + z_coef * noise, d_mu_t + d_z_coef * noise
 
 def spacial_interpolate(
