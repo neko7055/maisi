@@ -482,6 +482,7 @@ def diff_model_infer(
     # ── Noise scheduler ──
     noise_scheduler = define_instance(args, "noise_scheduler")
     noise_scheduler.step = MethodType(rk5_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
+    noise_scheduler.use_timestep_transform = False
     noise_scheduler.set_timesteps(
         num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
         input_img_size_numel=torch.prod(torch.tensor(args.diffusion_unet_inference["infer_size"])),
