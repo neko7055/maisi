@@ -632,7 +632,7 @@ def diff_model_infer(
     gc.collect()
     if dist.is_available() and dist.is_initialized():
         dist.barrier(device_ids=[local_rank])
-        dist.destroy_process_group()
+        #dist.destroy_process_group()
 
 
 if __name__ == "__main__":
