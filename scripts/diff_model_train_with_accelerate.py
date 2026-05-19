@@ -641,7 +641,7 @@ def diff_model_train(
     del train_loader, val_loader, unet, optimizer, lr_scheduler, noise_scheduler
     accelerator.free_memory()
     accelerator.wait_for_everyone()
-    accelerator.end_training()
+    #accelerator.end_training()
 
 
 if __name__ == "__main__":
