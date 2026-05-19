@@ -421,7 +421,7 @@ def diff_model_create_training_data(
     gc.collect()
     if dist.is_initialized():
         dist.barrier(device_ids=[local_rank])
-        dist.destroy_process_group()
+        #dist.destroy_process_group()
 
     logger.info("Training data creation finished.")
 
