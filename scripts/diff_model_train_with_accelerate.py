@@ -29,6 +29,7 @@ from .diff_model_setting import load_config, setup_logging
 from .interpolator import linear_interpolate, triangular_interpolate, polynomial_interpolate, spacial_interpolate
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 from .utils import define_instance
+from .model import Net
 
 
 # torch.set_float32_matmul_precision('high')
@@ -98,7 +99,7 @@ def prepare_data(
         batch_size: int = 1,
         gradient_accumulation_steps: int = 1,
         include_body_region: bool = False,
-        include_modality: bool = True,
+        include_modality: bool = False,
         modality_mapping: dict = None,
         for_training: bool = False,
 ) -> DataLoader:
@@ -196,19 +197,31 @@ def prepare_data(
 
 def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: logging.Logger) -> torch.nn.Module:
     # Load model to CPU first, let Accelerate handle movement
-    unet = define_instance(args, "diffusion_unet_def")
+    #unet = define_instance(args, "diffusion_unet_def")
+
+    unet = Net(in_channels=4,
+               out_channels=4,
+               cond_emb_dim=256,
+               time_embed_dim=64,
+               include_spacing_input=True,)
 
     # Optional: Convert BatchNorm to SyncBatchNorm for DDP
-    if accelerator.num_processes > 1:
-        unet = torch.nn.SyncBatchNorm.convert_sync_batchnorm(unet)
-
-    if args.existing_ckpt_filepath is None:
-        logger.info("Training from scratch.")
-    else:
-        # Load checkpoint on CPU map_location
-        checkpoint_unet = torch.load(f"{args.existing_ckpt_filepath}", map_location="cpu", weights_only=False)
-        unet.load_state_dict(checkpoint_unet["unet_state_dict"], strict=False)
-        logger.info(f"Pretrained checkpoint {args.existing_ckpt_filepath} loaded.")
+    # if accelerator.num_processes > 1:
+    #     unet = torch.nn.SyncBatchNorm.convert_sync_batchnorm(unet)
+    # logger.info("Training from scratch.")
+    # if args.existing_ckpt_filepath is None:
+    #     logger.info("Training from scratch.")
+    # else:
+    #     # Load checkpoint on CPU map_location
+    #     checkpoint_unet = torch.load(f"{args.existing_ckpt_filepath}", map_location="cpu", weights_only=False)
+    #     # model_dict = unet.state_dict()
+    #     # filtered = {
+    #     #     k: v for k, v in checkpoint_unet["unet_state_dict"].items()
+    #     #     if k in model_dict and v.shape == model_dict[k].shape
+    #     # }
+    #
+    #     unet.load_state_dict(checkpoint_unet["unet_state_dict"], strict=True)
+    #     logger.info(f"Pretrained checkpoint {args.existing_ckpt_filepath} loaded.")
 
     return unet
 
@@ -496,8 +509,8 @@ def diff_model_train(
 
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
-    include_body_region = unet.include_top_region_index_input
-    include_modality = unet.num_class_embeds is not None
+    include_body_region = False
+    include_modality = False
 
     if include_modality:
         with open(args.modality_mapping_path, "r") as f:

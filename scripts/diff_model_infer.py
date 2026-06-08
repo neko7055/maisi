@@ -36,6 +36,7 @@ from tqdm import tqdm
 from .diff_model_setting import initialize_distributed, load_config, setup_logging
 from .utils import define_instance, dynamic_infer, expand_first_conv_input_channels, build_ct_channel_params, apply_ct_channel_extend
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
+from .model import Net
 
 ode_solver_dict = {"euler":    euler_step,
                    "midpoint": midpoint_step,
@@ -86,13 +87,19 @@ def load_models(
 ) -> tuple:
     autoencoder = load_autoencoder(args, device, logger, is_kernel_extension)
 
-    unet = define_instance(args, "diffusion_unet_def").to(device)
+    #unet = define_instance(args, "diffusion_unet_def").to(device)
+
+    unet = Net(in_channels=4,
+               out_channels=4,
+               cond_emb_dim=256,
+               time_embed_dim=64,
+               include_spacing_input=True).to(device)
     checkpoint = torch.load(
         f"{args.model_dir}/{args.model_filename}",
         map_location=device,
         weights_only=False,
     )
-    unet.load_state_dict(checkpoint["unet_state_dict"], strict=False)
+    unet.load_state_dict(checkpoint["unet_state_dict"], strict=True)
     unet.eval()
     logger.info(f"checkpoints {args.model_dir}/{args.model_filename} loaded.")
 
@@ -146,7 +153,7 @@ def prepare_data(
         num_workers: int = 2,
         batch_size: int = 1,
         include_body_region: bool = False,
-        include_modality: bool = True,
+        include_modality: bool = False,
         modality_mapping: Optional[dict] = None,
 ) -> DataLoader:
 
@@ -486,8 +493,8 @@ def diff_model_infer(
         args, device, logger, is_kernel_extension
     )
 
-    include_body_region = unet.include_top_region_index_input
-    include_modality = unet.num_class_embeds is not None
+    include_body_region = False # unet.include_top_region_index_input
+    include_modality = False # unet.num_class_embeds is not None
 
     if include_modality:
         with open(args.modality_mapping_path, "r") as f:
