@@ -53,7 +53,7 @@ class VisionTransformer(nn.Module):
     def __init__(
         self,
         *,
-        patch_size = (4,4,4),
+        patch_size = (2,2,2),
         in_chans: int = 3,
         out_chans: int = 3,
         embed_dim: int = 768,
@@ -170,7 +170,7 @@ class Net(nn.Module):
             self.spacing_layer = self._create_embedding_module(3, self.cond_emb_dim)
             self.cond_emb_dim += self.cond_emb_dim
 
-        self.vit = VisionTransformer(patch_size=(4,4,4),
+        self.vit = VisionTransformer(patch_size=(2,2,2),
                                      in_chans=4,
                                      out_chans=4,
                                      embed_dim=1024,
