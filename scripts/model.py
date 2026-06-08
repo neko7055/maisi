@@ -47,7 +47,7 @@ from monai.networks.layers.factories import Pool
 from monai.utils import ensure_tuple_rep, optional_import
 from monai.utils.type_conversion import convert_to_tensor
 
-from .layers import PatchEmbed, TransformerBlock, FinalLayer, generate_3d_legendre_pe, generate_patch_mask_3d
+from .layers import PatchEmbed, TransformerBlock, FinalLayer, legendre_time_embedding, generate_3d_legendre_pe, generate_patch_mask_3d
 
 class VisionTransformer(nn.Module):
     def __init__(
