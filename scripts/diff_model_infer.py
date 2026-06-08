@@ -382,7 +382,7 @@ def run_inference(
                 device, non_blocking=True
             )
 
-        all_timesteps = np.linspace(0, 1, inference_total_steps + 1, endpoint=True, dtype=np.float32)
+        all_timesteps = np.linspace(0, 1, num_inference_steps + 1, endpoint=True, dtype=np.float32)
         all_timesteps, all_next_timesteps = all_timesteps[:-1], all_timesteps[1:]
 
         mu_t = src_images
