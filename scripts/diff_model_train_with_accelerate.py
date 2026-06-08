@@ -22,15 +22,12 @@ import monai
 import torch
 from accelerate import Accelerator  # Import Accelerate
 from monai.data import DataLoader, partition_dataset
-from monai.networks.schedulers import RFlowScheduler
 from monai.transforms import Compose
-from focal_frequency_loss import FocalFrequencyLoss as FFL
 
 from .optimizer import Lion, Lookahead
 from .diff_model_setting import load_config, setup_logging
-from .interpolator import linear_interpolate, triangular_interpolate, enc_dec_interpolate, polynomial_interpolate, spacial_interpolate
+from .interpolator import linear_interpolate, triangular_interpolate, polynomial_interpolate, spacial_interpolate
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
-from .ssim import _ssim_3D
 from .utils import define_instance
 
 
@@ -38,6 +35,15 @@ from .utils import define_instance
 # torch.backends.cudnn.allow_tf32 = True
 # torch.backends.cudnn.benchmark = True
 # torch.backends.cudnn.deterministic = False
+
+interpolate_dict = {"linear":     linear_interpolate,
+                    "triangular": triangular_interpolate,
+                    "polynomial": polynomial_interpolate,
+                    "spacial":    spacial_interpolate,}
+ode_solver_dict = {"euler":    euler_step,
+                   "midpoint": midpoint_step,
+                   "rk4":      rk4_step,
+                   "rk5":      rk5_step,}
 
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
@@ -88,7 +94,6 @@ def load_filenames(data_list_path: str, mode: str) -> list:
 
 def prepare_data(
         train_files: list,
-        cache_rate: float,
         num_workers: int = 2,
         batch_size: int = 1,
         gradient_accumulation_steps: int = 1,
@@ -169,7 +174,7 @@ def prepare_data(
     train_transforms = Compose(train_transforms_list)
 
     train_ds = monai.data.Dataset(
-        data=train_files, transform=train_transforms#, cache_rate=cache_rate, num_workers=num_workers
+        data=train_files, transform=train_transforms#, num_workers=num_workers
     )
     use_persistent = num_workers > 0
     if for_training:
@@ -247,7 +252,9 @@ def _call_unet(
 def evaluate(
         unet: torch.nn.Module,
         data_loader: DataLoader,
-        noise_scheduler: torch.nn.Module,
+        num_inference_steps: int,
+        interpolate,
+        ode_solver,
         accelerator: Accelerator,
         logger: logging.Logger,
         include_body_region,
@@ -259,7 +266,7 @@ def evaluate(
         logger.info(f"Evaluating.")
 
     _iter = 0
-    loss_torch = torch.zeros(4, dtype=torch.float, device=accelerator.device)
+    loss_torch = torch.zeros(5, dtype=torch.float, device=accelerator.device)
 
     unet.eval()
 
@@ -292,10 +299,8 @@ def evaluate(
 
         spacing_tensor = eval_data["spacing"].to(device, non_blocking=True)
 
-        all_timesteps = noise_scheduler.timesteps
-        all_next_timesteps = torch.cat((all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype)))
-        all_timesteps, all_next_timesteps = torch.flip(all_next_timesteps, dims=[-1]), torch.flip(all_timesteps,
-                                                                                                  dims=[-1])
+        all_timesteps = np.linspace(0, 1, num_inference_steps + 1, endpoint=True, dtype=np.float32)
+        all_timesteps, all_next_timesteps = all_timesteps[:-1], all_timesteps[1:]
         mu_t_tf = src_images
         mu_t = src_images
         with torch.inference_mode():
@@ -312,21 +317,20 @@ def evaluate(
                                       modality_tensor)
 
                 def dry_run(t, x):
-                    mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images,
-                                                                   torch.Tensor((t,)).repeat(x.shape[0]).to(device,
-                                                                                                            non_blocking=True),
-                                                                   force_no_noise=True)
+                    timesteps = torch.Tensor((t,)).repeat(x.shape[0]).to(device, non_blocking=True)
+                    mu_t_gt, d_mu_t_gt = interpolate(src_images, tar_images, timesteps)
                     return mu_t_gt, d_mu_t_gt
 
-                dt_org = next_t - t
-                dt = dt_org / noise_scheduler.num_train_timesteps
-                mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
+                dt = next_t - t
+                mu_t = ode_solver(model_wrapper, t, dt, mu_t)
 
                 mu_t_gt, d_mu_t_gt = dry_run(t, mu_t_tf)
                 v_pred_tf = model_wrapper(t, mu_t_gt)
                 mu_t_tf = mu_t_tf + dt * v_pred_tf
                 loss_pose = torch.nn.functional.mse_loss(mu_t, mu_t_tf, reduction='mean') * dt
+                loss_v = torch.nn.functional.l1_loss(d_mu_t_gt, v_pred_tf, reduction='mean') * dt
                 loss_torch[2] += loss_pose.item()
+                loss_torch[3] += loss_v.item()
             loss = torch.nn.functional.mse_loss(mu_t, tar_images, reduction='mean')
             loss_tf = torch.nn.functional.mse_loss(mu_t_tf, tar_images, reduction='mean')
             loss_torch[0] += loss.item()
@@ -343,9 +347,9 @@ def train_one_epoch(
         unet: torch.nn.Module,
         train_loader: DataLoader,
         optimizer: torch.optim.Optimizer,
-        lr_scheduler: torch.optim.lr_scheduler.PolynomialLR,
+        lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
         loss_pt: torch.nn.Module,
-        noise_scheduler: torch.nn.Module,
+        interpolate,
         accelerator: Accelerator,
         logger: logging.Logger,
         include_body_region,
@@ -392,13 +396,11 @@ def train_one_epoch(
                 device, non_blocking=True
             )
 
-        # Logic remains same
-        assert isinstance(noise_scheduler, RFlowScheduler)
         loss_float = 0
         for _ in range(time_batch_size):
-            timesteps = noise_scheduler.sample_timesteps(src_images)
+            timesteps = torch.rand((src_images.shape[0],), device=src_images.device)
             with accelerator.accumulate(unet), accelerator.autocast():
-                mu_t_gt, d_mu_t_gt = noise_scheduler.add_noise(src_images, tar_images, timesteps)
+                mu_t_gt, d_mu_t_gt = interpolate(src_images, tar_images, timesteps)
                 d_mu_t = _call_unet(unet,
                                     mu_t_gt,
                                     timesteps,
@@ -441,7 +443,6 @@ def save_checkpoint(
         epoch: int,
         unet: torch.nn.Module,
         loss_torch_epoch: float,
-        num_train_timesteps: int,
         ckpt_folder: str,
         args: argparse.Namespace,
         accelerator: Accelerator
@@ -458,7 +459,6 @@ def save_checkpoint(
             {
                 "epoch": epoch + 1,
                 "loss": loss_torch_epoch,
-                "num_train_timesteps": num_train_timesteps,
                 "unet_state_dict": unwrapped_unet.state_dict(),
             },
             f"{ckpt_folder}/{args.model_filename}",
@@ -485,14 +485,17 @@ def diff_model_train(
         logger.info(f"[config] ckpt_folder -> {args.model_dir}.")
         Path(args.model_dir).mkdir(parents=True, exist_ok=True)
 
+    if args.diffusion_unet_train["interpolate_mode"] in interpolate_dict.keys():
+        interpolate = interpolate_dict[args.diffusion_unet_train["interpolate_mode"]]
+    else:
+        assert False, f"interpolate_mode {args.diffusion_unet_train['interpolate_mode']} not recognized. Choose from {list(interpolate_dict.keys())}."
+    if args.diffusion_unet_train["ode_solver"] in ode_solver_dict.keys():
+        ode_solver = ode_solver_dict[args.diffusion_unet_train["ode_solver"]]
+    else:
+        assert False, f"ode_solver {args.diffusion_unet_train['ode_solver']} not recognized. Choose from {list(ode_solver_dict.keys())}."
+
     # Load UNet (Move to device logic handled by prepare, but we load first)
     unet = load_unet(args, accelerator, logger)
-    noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(rk5_step,
-                                      noise_scheduler)  # Option: euler_step, midpoint_step, rk4_step, rk5_step
-    noise_scheduler.add_noise = MethodType(partial(linear_interpolate, add_noise=False),
-                                           noise_scheduler)  # Option: linear_interpolate, triangular_interpolate, enc_dec_interpolate, polynomial_interpolate
-    noise_scheduler.use_timestep_transform = False
     include_body_region = unet.include_top_region_index_input
     include_modality = unet.num_class_embeds is not None
 
@@ -532,16 +535,9 @@ def diff_model_train(
         even_divisible=False
     )[accelerator.process_index]
 
-    # Calculate scale factor locally then sync
-    noise_scheduler.set_timesteps(
-        num_inference_steps=args.diffusion_unet_train["num_validation_steps"],
-        input_img_size_numel=torch.prod(torch.tensor(args.diffusion_unet_train["validation_infer_size"])),
-    )
-
     # Create DataLoader with local subset
     train_loader = prepare_data(
         train_files,
-        cache_rate=args.diffusion_unet_train["cache_rate"],
         num_workers=args.diffusion_unet_train["num_workers"],
         batch_size=args.diffusion_unet_train["batch_size"],
         gradient_accumulation_steps=args.diffusion_unet_train["gradient_accumulation_steps"],
@@ -553,7 +549,6 @@ def diff_model_train(
 
     val_loader = prepare_data(
         val_files,
-        cache_rate=0,
         num_workers=args.diffusion_unet_train["num_workers"],
         batch_size=args.diffusion_unet_train["validation_batch_size"],
         include_body_region=include_body_region,
@@ -576,6 +571,8 @@ def diff_model_train(
         unet, optimizer, lr_scheduler
     )
     accelerator.wait_for_everyone()
+    best_loss = np.inf
+    best_epoch = 0
     for epoch in range(args.diffusion_unet_train["n_epochs"]):
         start_time = time.perf_counter()
         loss_torch = train_one_epoch(
@@ -585,7 +582,7 @@ def diff_model_train(
             optimizer,
             lr_scheduler,
             loss_pt,
-            noise_scheduler,
+            interpolate,
             accelerator,
             logger,
             include_body_region,
@@ -610,7 +607,9 @@ def diff_model_train(
             eval_loss_torch = evaluate(
                 unet,
                 val_loader,
-                noise_scheduler,
+                args.diffusion_unet_train["num_inference_steps"],
+                interpolate,
+                ode_solver,
                 accelerator,
                 logger,
                 include_body_region,
@@ -626,19 +625,22 @@ def diff_model_train(
                 logger.info(
                     f"epoch {epoch + 1} average mse loss on validation set: {formatted}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
             accelerator.free_memory()
-        if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1:
-            save_checkpoint(
-                epoch,
-                unet,
-                loss_torch_epoch,
-                args.noise_scheduler["num_train_timesteps"],
-                args.model_dir,
-                args,
-                accelerator
-            )
+            logger.info(f"epoch {epoch + 1} best loss on validation set: {best_loss:.8f} at epoch {best_epoch + 1}.")
+            if eval_loss_torch[-2] < best_loss:
+                logger.info("Saving model")
+                save_checkpoint(
+                    epoch,
+                    unet,
+                    loss_torch_epoch,
+                    args.model_dir,
+                    args,
+                    accelerator
+                )
+                best_loss = eval_loss_torch[-2]
+                best_epoch = epoch
 
     logger.info("Training finished")
-    del train_loader, val_loader, unet, optimizer, lr_scheduler, noise_scheduler
+    del train_loader, val_loader, unet, optimizer, lr_scheduler
     accelerator.free_memory()
     accelerator.wait_for_everyone()
     #accelerator.end_training()

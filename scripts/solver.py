@@ -36,51 +36,24 @@ def construct_rk5():
     return c, a, b
 
 
-def euler_step(self, f, timestep, sample, next_timestep=None):
-    if next_timestep is not None:
-        dt_org = float(next_timestep - timestep)
-        dt: float = dt_org / self.num_train_timesteps
-    else:
-        dt = (
-            1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
-        )  # Avoid division by zero
-        dt_org = dt * self.num_train_timesteps
+def euler_step(f, timestep, dt, sample):
     v_pred = f(timestep, sample)
     pred_post_sample = sample + v_pred * dt
-    pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
-    return pred_post_sample, pred_original_sample
+    return pred_post_sample
 
-
-def midpoint_step(self, f, timestep, sample, next_timestep=None):
-    if next_timestep is not None:
-        dt_org = float(next_timestep - timestep)
-        dt: float = dt_org / self.num_train_timesteps
-    else:
-        dt = (
-            1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
-        )  # Avoid division by zero
-        dt_org = dt * self.num_train_timesteps
+def midpoint_step(f, timestep, dt, sample):
     x_mid = sample + 0.5 * dt * f(timestep, sample)
-    v_pred = f(timestep + 0.5 * dt_org, x_mid)
+    v_pred = f(timestep + 0.5 * dt, x_mid)
     pred_post_sample = sample + v_pred * dt
-    pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
-    return pred_post_sample, pred_original_sample
+    return pred_post_sample
 
 
-def rk4_step(self, f, timestep, sample, next_timestep=None):
-    if next_timestep is not None:
-        dt_org = float(next_timestep - timestep)
-        dt: float = dt_org / self.num_train_timesteps
-    else:
-        dt = (
-            1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
-        )  # Avoid division by zero
-        dt_org = dt * self.num_train_timesteps
+def rk4_step(f, timestep, dt, sample):
     c, a, b = construct_ralston4()
     k1 = f(timestep, sample)
-    k2 = f(timestep + c[0] * dt_org, sample + dt * a[0][0] * k1)
-    k3 = f(timestep + c[1] * dt_org, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
-    k4 = f(timestep + c[2] * dt_org, sample + dt * a[2][0] * k1 + dt * a[2][1] * k2 + dt * a[2][2] * k3)
+    k2 = f(timestep + c[0] * dt, sample + dt * a[0][0] * k1)
+    k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
+    k4 = f(timestep + c[2] * dt, sample + dt * (a[2][0] * k1 + a[2][1] * k2 + a[2][2] * k3))
     v_pred = (
             b[0] * k1
             + b[1] * k2
@@ -88,26 +61,17 @@ def rk4_step(self, f, timestep, sample, next_timestep=None):
             + b[3] * k4
     )
     pred_post_sample = sample + v_pred * dt
-    pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
-    return pred_post_sample, pred_original_sample
+    return pred_post_sample
 
 
-def rk5_step(self, f, timestep, sample, next_timestep=None):
-    if next_timestep is not None:
-        dt_org = float(next_timestep - timestep)
-        dt: float = dt_org / self.num_train_timesteps
-    else:
-        dt = (
-            1.0 / float(self.num_inference_steps) if self.num_inference_steps > 0 else 0.0
-        )  # Avoid division by zero
-        dt_org = dt * self.num_train_timesteps
+def rk5_step(f, timestep, dt, sample):
     c, a, b = construct_rk5()
     k1 = f(timestep, sample)
-    k2 = f(timestep + c[0] * dt_org, sample + dt * a[0][0] * k1)
-    k3 = f(timestep + c[1] * dt_org, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
-    k4 = f(timestep + c[2] * dt_org, sample + dt * (a[2][0] * k1 + a[2][1] * k2 + a[2][2] * k3))
-    k5 = f(timestep + c[3] * dt_org, sample + dt * (a[3][0] * k1 + a[3][1] * k2 + a[3][2] * k3 + a[3][3] * k4))
-    k6 = f(timestep + c[4] * dt_org,
+    k2 = f(timestep + c[0] * dt, sample + dt * a[0][0] * k1)
+    k3 = f(timestep + c[1] * dt, sample + dt * (a[1][0] * k1 + a[1][1] * k2))
+    k4 = f(timestep + c[2] * dt, sample + dt * (a[2][0] * k1 + a[2][1] * k2 + a[2][2] * k3))
+    k5 = f(timestep + c[3] * dt, sample + dt * (a[3][0] * k1 + a[3][1] * k2 + a[3][2] * k3 + a[3][3] * k4))
+    k6 = f(timestep + c[4] * dt,
            sample + dt * (a[4][0] * k1 + a[4][1] * k2 + a[4][2] * k3 + a[4][3] * k4 + a[4][4] * k5))
     v_pred = (
             b[0] * k1
@@ -118,8 +82,7 @@ def rk5_step(self, f, timestep, sample, next_timestep=None):
             + b[5] * k6
     )
     pred_post_sample = sample + v_pred * dt
-    pred_original_sample = sample + v_pred * timestep / self.num_train_timesteps
-    return pred_post_sample, pred_original_sample
+    return pred_post_sample
 
 
 if __name__ == "__main__":

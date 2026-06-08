@@ -1,8 +1,8 @@
 import math
 import torch
 
-def linear_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1e-08, force_no_noise=False) :
-    timepoints = timesteps.float() / self.num_train_timesteps
+def linear_interpolate(sources, targets, timesteps) :
+    timepoints = timesteps.float()
     assert sources.shape == targets.shape
     # expand timepoint to noise shape
     if sources.ndim == 5:
@@ -12,18 +12,12 @@ def linear_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1
     else:
         raise ValueError(f"noise tensor has to be 4D or 5D tensor, yet got shape of {sources.shape}")
 
-    mu_t = (1 - timepoints) * sources + timepoints * targets
+    mu_t = sources + timepoints * (targets - sources)
     d_mu_t = targets - sources
-    if add_noise:
-        z_coef = torch.sqrt(2 * timepoints * (1 - timepoints))
-        dz_coef = (1 - 2 * timepoints) / torch.clamp(z_coef, min=eps)
-        noise = torch.randn_like(mu_t)
-        return mu_t + z_coef * noise, d_mu_t + dz_coef * noise
-    else:
-        return mu_t, d_mu_t
+    return mu_t, d_mu_t
 
-def polynomial_interpolate(self, sources, targets, timesteps, add_noise=False, sigma_0=1, sigma_1=0.00001) :
-    timepoints = timesteps.float() / self.num_train_timesteps
+def polynomial_interpolate(sources, targets, timesteps) :
+    timepoints = timesteps.float()
     assert sources.shape == targets.shape
     # expand timepoint to noise shape
     if sources.ndim == 5:
@@ -37,19 +31,10 @@ def polynomial_interpolate(self, sources, targets, timesteps, add_noise=False, s
     df_t = 10 * timepoints ** 4 - 18 * timepoints ** 3 + 6 * timepoints ** 2 + timepoints + 1
     mu_t = sources + f_t * (targets - sources)
     d_mu_t = df_t * (targets - sources)
-    if add_noise:
-        a = -3
-        g_t = (1-torch.exp(-a * timepoints)) / (1-math.exp(-a))
-        dg_t = (a * torch.exp(-a * timepoints)) / (1-math.exp(-a))
-        noise = torch.randn_like(mu_t)
-        z_coef = sigma_0 + g_t * (sigma_1 - sigma_0)
-        dz_coef = dg_t * (sigma_1 - sigma_0)
-        return mu_t + z_coef * noise, d_mu_t + dz_coef * noise
-    else:
-        return mu_t, d_mu_t
+    return mu_t, d_mu_t
 
-def triangular_interpolate(self, sources, targets, timesteps, add_noise=False, eps=1e-08) :
-    timepoints = timesteps.float() / self.num_train_timesteps
+def triangular_interpolate(sources, targets, timesteps) :
+    timepoints = timesteps.float()
     assert sources.shape == targets.shape
     # expand timepoint to noise shape
     if sources.ndim == 5:
@@ -63,44 +48,15 @@ def triangular_interpolate(self, sources, targets, timesteps, add_noise=False, e
     c_t, s_t = torch.cos(alpha * timepoints), torch.sin(alpha * timepoints)
     mu_t = c_t * sources + s_t * targets
     d_mu_t = alpha * (c_t * targets - s_t * sources)
+    return mu_t, d_mu_t
 
-    if add_noise:
-        gamma = torch.sqrt(2 * timepoints * (1 - timepoints))
-        d_gamma = (1 - 2 * timepoints) / torch.clamp(gamma, min=eps)
-        z_coef = gamma
-        dz_coef = d_gamma
-        noise = torch.randn_like(mu_t)
-        return torch.sqrt(1-gamma**2) * mu_t + z_coef * noise, (((1-gamma**2) * d_mu_t - gamma * d_gamma * mu_t) / torch.sqrt(1-gamma**2)) + dz_coef * noise
-    else:
-        return mu_t, d_mu_t
-
-def enc_dec_interpolate(self, sources, targets, timesteps, add_noise=True, force_no_noise=False) :
-    assert add_noise, "enc-dec interpolation requires noise to be added, yet add_noise is set to False"
-    timepoints = timesteps.float() / self.num_train_timesteps
-    assert sources.shape == targets.shape
-    # expand timepoint to noise shape
-    if sources.ndim == 5:
-        timepoints = timepoints[..., None, None, None, None]
-    elif sources.ndim == 4:
-        timepoints = timepoints[..., None, None, None]
-    else:
-        raise ValueError(f"noise tensor has to be 4D or 5D tensor, yet got shape of {sources.shape}")
-    mu_coef = torch.cos(torch.pi * timepoints) ** 2
-    d_mu_coef = -torch.pi * torch.sin(2 * torch.pi * timepoints)
-    z_coef = torch.sin(torch.pi * timepoints) ** 2
-    d_z_coef = torch.pi * torch.sin(2 * torch.pi * timepoints)
-    mask = (timepoints < 0.5).to(torch.float32)
-    images = sources * mask + targets * (1 - mask)
-    mu_t = mu_coef * images
-    d_mu_t = d_mu_coef * images
-    noise = torch.randn_like(mu_t)
-    if force_no_noise:
-        return mu_t, d_mu_t
-    return mu_t + z_coef * noise, d_mu_t + d_z_coef * noise
-
-def spacial_interpolate(
-    self,x0, x1, t,freq_a=0.25,freq_b=0.5, a_max=3.0, eps=1e-8, add_noise=True, sigma_0=1, sigma_1=0.00001, force_no_noise=False
-):
+def spacial_interpolate(x0,
+                        x1,
+                        t,
+                        freq_a=0.25,
+                        freq_b=0.5,
+                        a_max=3.0,
+                        eps=1e-8):
     """
     x0, x1: [B, C, D, H, W] 或 [B, D, H, W]
     t:      [B]
@@ -108,7 +64,7 @@ def spacial_interpolate(
         xt:    same shape as x0
         dx_dt: same shape as x0, 表示每個 sample 各自對應 t[b] 的偏微分
     """
-    t = t.float() / self.num_train_timesteps
+    t = t.float()
     if x0.shape != x1.shape:
         raise ValueError("x0 and x1 must have the same shape")
     if t.ndim != 1 or t.shape[0] != x0.shape[0]:
@@ -181,17 +137,4 @@ def spacial_interpolate(
     # 6. 轉回空間域
     mu_t = torch.fft.irfftn(Y, s=(D, H, W), dim=(-3, -2, -1), norm="ortho")
     d_mu_t = torch.fft.irfftn(dY_dt, s=(D, H, W), dim=(-3, -2, -1), norm="ortho")
-    if force_no_noise:
-        return mu_t, d_mu_t
-
-    if add_noise:
-        t = t[..., None, None, None, None]
-        a = -a_max
-        g_t = (1 - torch.exp(-a * t)) / (1 - math.exp(-a))
-        dg_t = (a * torch.exp(-a * t)) / (1 - math.exp(-a))
-        noise = torch.randn_like(mu_t)
-        z_coef = sigma_0 + g_t * (sigma_1 - sigma_0)
-        dz_coef = dg_t * (sigma_1 - sigma_0)
-        return mu_t + z_coef * noise, d_mu_t + dz_coef * noise
-    else:
-        return mu_t, d_mu_t
+    return mu_t, d_mu_t

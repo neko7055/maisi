@@ -42,19 +42,7 @@ env_config_out["trained_autoencoder_path"] = os.path.join(env_config_out["model_
 env_config_out["trained_ke_autoencoder_path"] = None
 env_config_out["existing_ckpt_filepath"] = os.path.join(env_config_out["model_dir"], "diff_unet_3d_rflow-ct.pt")
 env_config_out["modality_mapping_path"] = os.path.join(env_config_out["work_dir"], "configs", "modality_mapping.json")
-env_config_out["dinov3_repo_path"] = os.path.join(env_config_out["work_dir"], "dinov3")
-env_config_out["dinov3_model_path"] = os.path.join(env_config_out["dinov3_repo_path"], "dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth")
-env_config_out["dinov3_model_type"] = "dinov3_vits16plus"
-env_config_out["dinov3_adapter_filename"] = "my_dinov3_adapter.pt"
-
 # download pre-trained model from https://huggingface.co/nvidia/NV-Generate-CT
-# trained_autoencoder_path_url = (
-#     "https://developer.download.nvidia.com/assets/Clara/monai/tutorials/"
-#     "model_zoo/model_maisi_autoencoder_epoch273_alternative.pt"
-# )
-# if not os.path.exists(env_config_out["trained_autoencoder_path"]):
-#     download_url(url=trained_autoencoder_path_url, filepath=env_config_out["trained_autoencoder_path"])
-
 # Create necessary directories
 os.makedirs(env_config_out["work_dir"], exist_ok=True)
 os.makedirs(env_config_out["model_dir"], exist_ok=True)
@@ -69,53 +57,29 @@ model_config_out["transform_to_laten"]["sw_batch_size"] = 15 # 225 for h100
 model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 64]
 model_config_out["transform_to_laten"]["autoencoder_tp_num_splits"] = 1
 model_config_out["transform_to_laten"]["modality"] = "ct_non_contrast_to_contrast"
-model_config_out["transform_to_laten"]["cache_rate"] = 1.0
 model_config_out["transform_to_laten"]["num_workers"] = 4
 
 model_config_out["diffusion_unet_train"] = OrderedDict()
 model_config_out["diffusion_unet_train"]["batch_size"] = 1 # 3 for h100
 model_config_out["diffusion_unet_train"]["time_batch_size"]=1
 model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 1
-model_config_out["diffusion_unet_train"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_train"]["num_workers"] = 4
 model_config_out["diffusion_unet_train"]["lr"] = 0.0001
 model_config_out["diffusion_unet_train"]["n_epochs"] = 125
-model_config_out["diffusion_unet_train"]["num_validation_steps"] = 1
+model_config_out["diffusion_unet_train"]["num_inference_steps"] = 1
 model_config_out["diffusion_unet_train"]["validation_batch_size"] = 8
-model_config_out["diffusion_unet_train"]["validation_infer_size"] = [64, 64, 64]
+model_config_out["diffusion_unet_train"]["interpolate_mode"] = "linear" # [linear, triangular, polynomial, spacial] is valid
+model_config_out["diffusion_unet_train"]["ode_solver"] = "euler" # [euler, midpoint, rk4, rk5] is valid
 
 model_config_out["diffusion_unet_inference"] = OrderedDict()
-model_config_out["diffusion_unet_inference"]["infer_size"] = [64, 64, 64]
 model_config_out["diffusion_unet_inference"]["batch_size"] = 1
 model_config_out["diffusion_unet_inference"]["sw_batch_size"] = 1
-model_config_out["diffusion_unet_inference"]["cache_rate"] = 1.0
 model_config_out["diffusion_unet_inference"]["num_workers"] = 4
-model_config_out["diffusion_unet_inference"]["num_inference_steps"] = 1
+model_config_out["diffusion_unet_inference"]["num_inference_steps"] = 10
+model_config_out["diffusion_unet_inference"]["ode_solver"] = "rk5" # [euler, midpoint, rk4, rk5] is valid
 model_config_out["diffusion_unet_inference"]["slide_window_size"] = [16, 16, 16] # equal to [64, 64, 64] in encode
 model_config_out["diffusion_unet_inference"]["autoencoder_tp_num_splits"] = 1
 model_config_out["diffusion_unet_inference"]["random_seed"] = 41
-
-model_config_out["vae_train"] = OrderedDict()
-model_config_out["vae_train"]["data_option"] = OrderedDict()
-model_config_out["vae_train"]["data_option"]["random_aug"]= True
-model_config_out["vae_train"]["data_option"]["spacing_type"] = "rand_zoom"
-model_config_out["vae_train"]["data_option"]["spacing"] = None
-model_config_out["vae_train"]["data_option"]["select_channel"] = 0
-model_config_out["vae_train"]["autoencoder_train"] = OrderedDict()
-model_config_out["vae_train"]["autoencoder_train"]["batch_size"] = 8
-model_config_out["vae_train"]["autoencoder_train"]["gradient_accumulation_steps"] = 8
-model_config_out["vae_train"]["autoencoder_train"]["patch_size"] = [64, 64, 64]
-model_config_out["vae_train"]["autoencoder_train"]["lr"] =0.0001
-model_config_out["vae_train"]["autoencoder_train"]["cache_rate"] = 1.0
-model_config_out["vae_train"]["autoencoder_train"]["n_epochs"] = 275
-model_config_out["vae_train"]["autoencoder_train"]["num_workers"] = 4
-
-model_config_out["dino_finetune"] = OrderedDict()
-model_config_out["dino_finetune"]["batch_size"] = 4
-model_config_out["dino_finetune"]["gradient_accumulation_steps"] = 4
-model_config_out["dino_finetune"]["cache_rate"] = 1.0
-model_config_out["dino_finetune"]["lr"] = 0.001
-model_config_out["dino_finetune"]["n_epochs"] = 1000
 
 # modality mapping json
 

@@ -37,6 +37,11 @@ from .diff_model_setting import initialize_distributed, load_config, setup_loggi
 from .utils import define_instance, dynamic_infer, expand_first_conv_input_channels, build_ct_channel_params, apply_ct_channel_extend
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 
+ode_solver_dict = {"euler":    euler_step,
+                   "midpoint": midpoint_step,
+                   "rk4":      rk4_step,
+                   "rk5":      rk5_step,}
+
 # torch.set_float32_matmul_precision('high')
 # torch.backends.cudnn.allow_tf32 = True
 # torch.backends.cudnn.benchmark = True
@@ -138,7 +143,6 @@ def prepare_file_list(
 
 def prepare_data(
         train_files: list,
-        cache_rate: float,
         num_workers: int = 2,
         batch_size: int = 1,
         include_body_region: bool = False,
@@ -318,7 +322,8 @@ def run_inference(
         unet: torch.nn.Module,
         autoencoder: torch.nn.Module,
         data_loader: DataLoader,
-        noise_scheduler: RFlowScheduler,
+        num_inference_steps: int,
+        ode_solver,
         inferer: SlidingWindowInferer,
         logger: logging.Logger,
         include_body_region: bool,
@@ -370,12 +375,8 @@ def run_inference(
                 device, non_blocking=True
             )
 
-        all_timesteps = noise_scheduler.timesteps
-        all_next_timesteps = torch.cat(
-            (all_timesteps[1:], torch.tensor([0.0], dtype=all_timesteps.dtype))
-        )
-        all_timesteps, all_next_timesteps = torch.flip(all_next_timesteps, dims=[-1]), torch.flip(all_timesteps,
-                                                                                                  dims=[-1])
+        all_timesteps = np.linspace(0, 1, inference_total_steps + 1, endpoint=True, dtype=np.float32)
+        all_timesteps, all_next_timesteps = all_timesteps[:-1], all_timesteps[1:]
 
         mu_t = src_images
 
@@ -394,7 +395,7 @@ def run_inference(
                 device_type=device.type, enabled=True, dtype=torch.bfloat16
         ):
             for t, next_t in zip(all_timesteps, all_next_timesteps):
-                mu_t, _ = noise_scheduler.step(model_wrapper, t, mu_t, next_t)
+                mu_t = ode_solver(model_wrapper, t, next_t - t, mu_t)
 
         with torch.inference_mode(), torch.autocast(
                 device_type=device.type, enabled=True, dtype=torch.float16
@@ -476,16 +477,13 @@ def diff_model_infer(
         f"Using {device} of {world_size} with random seed: {random_seed}"
     )
 
+    if args.diffusion_unet_train["ode_solver"] in ode_solver_dict.keys():
+        ode_solver = ode_solver_dict[args.diffusion_unet_train["ode_solver"]]
+    else:
+        assert False, f"ode_solver {args.diffusion_unet_train['ode_solver']} not recognized. Choose from {list(ode_solver_dict.keys())}."
+
     autoencoder, unet = load_models(
         args, device, logger, is_kernel_extension
-    )
-    # ── Noise scheduler ──
-    noise_scheduler = define_instance(args, "noise_scheduler")
-    noise_scheduler.step = MethodType(rk5_step, noise_scheduler) # Option: euler_step, midpoint_step, rk4_step, rk5_step
-    noise_scheduler.use_timestep_transform = False
-    noise_scheduler.set_timesteps(
-        num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
-        input_img_size_numel=torch.prod(torch.tensor(args.diffusion_unet_inference["infer_size"])),
     )
 
     include_body_region = unet.include_top_region_index_input
@@ -551,7 +549,6 @@ def diff_model_infer(
     # ── DataLoader ──
     train_loader = prepare_data(
         train_files,
-        cache_rate=args.diffusion_unet_inference["cache_rate"],
         num_workers=args.diffusion_unet_inference["num_workers"],
         batch_size=args.diffusion_unet_inference["batch_size"],
         include_body_region=include_body_region,
@@ -560,7 +557,6 @@ def diff_model_infer(
     )
     val_loader = prepare_data(
         val_files,
-        cache_rate=args.diffusion_unet_inference["cache_rate"],
         num_workers=args.diffusion_unet_inference["num_workers"],
         batch_size=args.diffusion_unet_inference["batch_size"],
         include_body_region=include_body_region,
@@ -569,7 +565,6 @@ def diff_model_infer(
     )
     test_loader = prepare_data(
         test_files,
-        cache_rate=args.diffusion_unet_inference["cache_rate"],
         num_workers=args.diffusion_unet_inference["num_workers"],
         batch_size=args.diffusion_unet_inference["batch_size"],
         include_body_region=include_body_region,
@@ -612,7 +607,8 @@ def diff_model_infer(
                 unet=unet,
                 autoencoder=autoencoder,
                 data_loader=loader,
-                noise_scheduler=noise_scheduler,
+                num_inference_steps=args.diffusion_unet_inference["num_inference_steps"],
+                ode_solver=ode_solver,
                 inferer=inferer,
                 logger=logger,
                 include_body_region=include_body_region,

@@ -183,7 +183,6 @@ def build_file_list(
 def prepare_data(
         file_list: list[dict],
         transforms: Compose,
-        cache_rate: float,
         num_workers: int = 2,
         batch_size: int = 1,
 ) -> DataLoader:
@@ -307,7 +306,6 @@ def diff_model_create_training_data(
     io_executor = ProcessPoolExecutor(max_workers=4)
 
     # ── DataLoader 設定（參考 diff_model_infer.py）──
-    cache_rate = args.transform_to_laten["cache_rate"]
     dl_num_workers = args.transform_to_laten["num_workers"]
     batch_size = args.transform_to_laten["batch_size"]
     cleanup_interval = 50
@@ -361,7 +359,6 @@ def diff_model_create_training_data(
             data_loader = prepare_data(
                 file_list=file_list,
                 transforms=data_transforms,
-                cache_rate=cache_rate,
                 num_workers=dl_num_workers,
                 batch_size=batch_size,
             )
