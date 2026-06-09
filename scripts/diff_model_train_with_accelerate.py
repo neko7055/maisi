@@ -185,9 +185,11 @@ def prepare_data(
 
                 monai.transforms.RandAffined(padding_mode="reflect", **affine_kwargs),
 
-                monai.transforms.RandAffined(padding_mode="zero", **affine_kwargs),
+                monai.transforms.RandAffined(padding_mode="zeros", **affine_kwargs),
+
+                monai.transforms.RandAffined(padding_mode="nearest", **affine_kwargs),
             ],
-            weights=[1/3, 1/3, 1/3]  # 權重會自動歸一化，可依需求調整如 [0.7, 0.3]
+            weights=[1/4, 1/4, 1/4, 1/4]  # 權重會自動歸一化，可依需求調整如 [0.7, 0.3]
         )
         train_transforms_list += [augment]
     train_transforms = Compose(train_transforms_list)
