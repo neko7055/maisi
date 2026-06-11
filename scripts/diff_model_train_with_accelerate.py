@@ -175,7 +175,7 @@ def prepare_data(
     if for_training:
         affine_kwargs = {
             "keys": ["src_image", "tar_image"],
-            "prob": 0.9,  # 這裡設 1.0，改由 OneOf 控制總機率
+            "prob": 0.8,  # 這裡設 1.0，改由 OneOf 控制總機率
             "translate_range": (15, 15, 15),  # 百分比平移可以搭配前述技巧
             "mode": ("bilinear", "bilinear"),
         }
