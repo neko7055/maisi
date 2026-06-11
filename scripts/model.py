@@ -47,7 +47,7 @@ from monai.networks.layers.factories import Pool
 from monai.utils import ensure_tuple_rep, optional_import
 from monai.utils.type_conversion import convert_to_tensor
 
-from .layers import PatchEmbed, TransformerBlock, FinalLayer, legendre_time_embedding, generate_3d_legendre_pe, generate_patch_mask_3d
+from .layers import PatchEmbed, TransformerBlock, FinalLayer, legendre_time_embedding, generate_3d_legendre_pe
 
 class VisionTransformer(nn.Module):
     def __init__(
@@ -108,7 +108,6 @@ class VisionTransformer(nn.Module):
                                       patch_size,
                                       self.out_channels,
                                       temb_channels,)
-        self.mask_token = nn.Parameter(torch.zeros(1, embed_dim, 1, 1, 1))
 
     def _get_pe(self, H, W, D, device):
         x_coords = torch.linspace(-1, 1, steps=H, device=device)
@@ -121,13 +120,9 @@ class VisionTransformer(nn.Module):
         embeddings = embeddings.permute(-1,0,1,2).unsqueeze(0)
         return embeddings
 
-    def forward(self, x: torch.Tensor, emb: torch.Tensor, mask_ratio=0.5) -> tuple[Tensor, Any] | Tensor:
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
         x = self.patch_embed(x, emb)
         B, C, H, W, D = x.shape
-
-        if self.training:
-            mask = generate_patch_mask_3d(B, H, W, D, mask_ratio=mask_ratio, device=x.device)
-            x = x * (1-mask) + self.mask_token * mask
         pe = self._get_pe(H, W, D, x.device)
         for _, blk in enumerate(self.blocks):
             x = blk(x, emb, pe=pe)
@@ -224,7 +219,7 @@ class Net(nn.Module):
         Returns:
             A tensor representing the output of the UNet model.
         """
-
+        x: torch.Tensor = convert_to_tensor(x)
         emb = self._get_time_and_class_embedding(x, timesteps)
         emb = self._get_input_embeddings(emb, spacing_tensor)
         h = self.vit(x, emb)
