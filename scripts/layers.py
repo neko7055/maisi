@@ -303,21 +303,18 @@ class FourierGlobalFilter(nn.Module):
         super().__init__()
         self.pe_dim = pe_dim
         self.attn_map = nn.Conv3d(self.pe_dim, dim, kernel_size=1, stride=1, padding=0, bias=True)
-        self.conv1x1 = nn.Conv3d(dim, dim, kernel_size=1, stride=1, padding=0, bias=False)
         self._init_weights()
 
     def _init_weights(self):
-        torch.nn.init.zeros_(self.conv1x1.weight)
-        if self.conv1x1.bias is not None:
-            nn.init.zeros_(self.conv1x1.bias)
+        torch.nn.init.zeros_(self.attn_map.weight)
+        if self.attn_map.bias is not None:
+            nn.init.zeros_(self.attn_map.bias)
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
         B, C, H, W, D = x.shape
         attn = self.attn_map(pe)
-        #with torch.autocast(device_type=x.device.type, enabled=False, dtype=torch.float32):
         attn = torch.fft.rfftn(attn, dim=(-3, -2, -1), norm="ortho")
         x = torch.fft.rfftn(x, dim=(-3, -2, -1), norm="ortho")
         x = x * attn
-        x = torch.complex(self.conv1x1(x.real), self.conv1x1(x.imag))
         x = torch.fft.irfftn(x, s=(H, W, D), dim=(-3, -2, -1), norm="ortho")
         return x
 
