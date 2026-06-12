@@ -49,28 +49,27 @@ from monai.utils.type_conversion import convert_to_tensor
 
 from .layers import PatchEmbed, TransformerBlock, FinalLayer, legendre_time_embedding, generate_3d_legendre_pe
 
+
 class VisionTransformer(nn.Module):
     def __init__(
-        self,
-        *,
-        patch_size = (2,2,2),
-        in_chans: int = 3,
-        out_chans: int = 3,
-        embed_dim: int = 768,
-        temb_channels: int = 256,
-        depth: int = 12,
-        num_heads: int = 12,
-        ffn_ratio: int = 4,
-        qkv_bias: bool = False,
-        proj_bias: bool = False,
-        ffn_bias: bool = True,
-        legendre_max_degree: int = 21,
-        device: Any | None = None,
-        **ignored_kwargs,
+            self,
+            *,
+            patch_size=(4, 4, 4),
+            in_chans: int = 3,
+            out_chans: int = 3,
+            embed_dim: int = 768,
+            temb_channels: int = 256,
+            depth: int = 12,
+            num_heads: int = 12,
+            ffn_ratio: int = 4,
+            qkv_bias: bool = False,
+            proj_bias: bool = False,
+            ffn_bias: bool = True,
+            legendre_max_degree: int = 21,
+            device: Any | None = None,
+            **ignored_kwargs,
     ):
         super().__init__()
-        if len(ignored_kwargs) > 0:
-            logger.warning(f"Ignored kwargs: {ignored_kwargs}")
         del ignored_kwargs
 
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
@@ -107,7 +106,7 @@ class VisionTransformer(nn.Module):
         self.final_layer = FinalLayer(embed_dim,
                                       patch_size,
                                       self.out_channels,
-                                      temb_channels,)
+                                      temb_channels, )
 
     def _get_pe(self, H, W, D, device):
         x_coords = torch.linspace(-1, 1, steps=H, device=device)
@@ -117,25 +116,27 @@ class VisionTransformer(nn.Module):
         coords = torch.stack([X.reshape(-1), Y.reshape(-1), Z.reshape(-1)], dim=-1)
         embeddings = generate_3d_legendre_pe(coords, self.legendre_max_degree)
         embeddings = embeddings.view(H, W, D, -1)
-        embeddings = embeddings.permute(-1,0,1,2).unsqueeze(0)
+        embeddings = embeddings.permute(-1, 0, 1, 2).unsqueeze(0)
         return embeddings
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
         x = self.patch_embed(x, emb)
         B, C, H, W, D = x.shape
+
         pe = self._get_pe(H, W, D, x.device)
         for _, blk in enumerate(self.blocks):
             x = blk(x, emb, pe=pe)
         x = self.final_layer(x, emb)
-        x = x.reshape(shape=(B,self.out_channels,
-                             self.patch_embed.patch_size[0], self.patch_embed.patch_size[1],self.patch_embed.patch_size[2],
+        x = x.reshape(shape=(B, self.out_channels,
+                             self.patch_embed.patch_size[0], self.patch_embed.patch_size[1],
+                             self.patch_embed.patch_size[2],
                              H, W, D,))
         x = torch.einsum('ncpqkhwd->nchpwqdk', x)
         x = x.reshape(shape=(x.shape[0],
-                                self.out_channels,
-                                H * self.patch_embed.patch_size[0],
-                                W * self.patch_embed.patch_size[1],
-                                D * self.patch_embed.patch_size[2]))
+                             self.out_channels,
+                             H * self.patch_embed.patch_size[0],
+                             W * self.patch_embed.patch_size[1],
+                             D * self.patch_embed.patch_size[2]))
         return x
 
 class Net(nn.Module):
@@ -219,7 +220,7 @@ class Net(nn.Module):
         Returns:
             A tensor representing the output of the UNet model.
         """
-        x: torch.Tensor = convert_to_tensor(x)
+        # x: torch.Tensor = convert_to_tensor(x)
         emb = self._get_time_and_class_embedding(x, timesteps)
         emb = self._get_input_embeddings(emb, spacing_tensor)
         h = self.vit(x, emb)

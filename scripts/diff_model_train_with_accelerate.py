@@ -175,8 +175,8 @@ def prepare_data(
     if for_training:
         affine_kwargs = {
             "keys": ["src_image", "tar_image"],
-            "prob": 0.8,  # 這裡設 1.0，改由 OneOf 控制總機率
-            "translate_range": (15, 15, 15),  # 百分比平移可以搭配前述技巧
+            "prob": 0.75,  # 這裡設 1.0，改由 OneOf 控制總機率
+            "translate_range": (16, 16, 16),  # 百分比平移可以搭配前述技巧
             "mode": ("bilinear", "bilinear"),
         }
         augment = monai.transforms.OneOf(
@@ -185,11 +185,9 @@ def prepare_data(
 
                 monai.transforms.RandAffined(padding_mode="reflect", **affine_kwargs),
 
-                monai.transforms.RandAffined(padding_mode="zeros", **affine_kwargs),
-
                 monai.transforms.RandAffined(padding_mode="nearest", **affine_kwargs),
             ],
-            weights=[1/4, 1/4, 1/4, 1/4]  # 權重會自動歸一化，可依需求調整如 [0.7, 0.3]
+            weights=[1/3, 1/3, 1/3]  # 權重會自動歸一化，可依需求調整如 [0.7, 0.3]
         )
         train_transforms_list += [augment]
     train_transforms = Compose(train_transforms_list)

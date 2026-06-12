@@ -12,12 +12,6 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 
-dtype_dict = {
-    "fp32": torch.float32,
-    "fp16": torch.float16,
-    "bf16": torch.bfloat16,
-}
-
 def make_2tuple(x: tuple[int, int] | int):
     if isinstance(x, tuple):
         assert len(x) == 2
@@ -45,7 +39,6 @@ def legendre_time_embedding(timesteps: torch.Tensor, embedding_dim: int):
         out[:, n + 1] = ((2 * n + 1) * x * out[:, n] - n * out[:, n - 1]) / (n + 1)
     out = out[:, 1:]
     return out
-
 
 def generate_3d_legendre_pe(coords: torch.Tensor, max_degree: int) -> torch.Tensor:
     """
@@ -102,6 +95,18 @@ def layer_norm(x, eps=1e-6):
     x = (x - u) * torch.rsqrt(s + eps)
     return x
 
+
+class LayerNorm(nn.Module):
+    def __init__(self, normalized_shape, eps=1e-6):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(normalized_shape))
+        self.bias = nn.Parameter(torch.zeros(normalized_shape))
+        self.eps = eps
+    def forward(self, x):
+        x = layer_norm(x, self.eps)
+        x = self.weight[:, None, None, None] * x + self.bias[:, None, None, None]
+        return x
+
 class AdaLN(nn.Module):
     def __init__(self, num_channels,
                  emb_dim,
@@ -128,42 +133,42 @@ class AdaLN(nn.Module):
         h = layer_norm(x, self.eps)
         return h * (1 + scale) + shift
 
-@torch.compile(mode="max-autotune-no-cudagraphs", dynamic=True, fullgraph=True)
+# ----------------- 效能優化區塊 (Lifting Scheme) -----------------
 def lift_core_dwt(even: torch.Tensor, odd: torch.Tensor, dim: int):
-    alpha = -1.586134342059924
-    beta = -0.052980118572961
-    gamma = 0.882911075530934
-    delta = 0.443506852043971
-    K = 1.149604398860241
+    # CDF 5/3 (Bior 2.2) 提升係數
+    alpha = -0.5
+    beta = 0.25
+    K = 1.4142135623730951  # math.sqrt(2)
 
+    # Step 1: Predict
     odd = odd + alpha * (even + torch.roll(even, shifts=-1, dims=dim))
-    even = even + beta * (odd + torch.roll(odd, shifts=1, dims=dim))
-    odd = odd + gamma * (even + torch.roll(even, shifts=-1, dims=dim))
-    even = even + delta * (odd + torch.roll(odd, shifts=1, dims=dim))
 
+    # Step 2: Update
+    even = even + beta * (odd + torch.roll(odd, shifts=1, dims=dim))
+
+    # Step 3: Scale
     return even * K, odd * (1.0 / K)
 
-
-@torch.compile(mode="max-autotune-no-cudagraphs", dynamic=True, fullgraph=True)
 def lift_core_idwt(low: torch.Tensor, high: torch.Tensor, dim: int):
-    alpha = -1.586134342059924
-    beta = -0.052980118572961
-    gamma = 0.882911075530934
-    delta = 0.443506852043971
-    K = 1.149604398860241
+    alpha = -0.5
+    beta = 0.25
+    K = 1.4142135623730951  # math.sqrt(2)
 
+    # Step 1: Inverse Scale
     even = low * (1.0 / K)
     odd = high * K
 
-    even = even - delta * (odd + torch.roll(odd, shifts=1, dims=dim))
-    odd = odd - gamma * (even + torch.roll(even, shifts=-1, dims=dim))
+    # Step 2: Inverse Update (反向減去 Update)
     even = even - beta * (odd + torch.roll(odd, shifts=1, dims=dim))
+
+    # Step 3: Inverse Predict (反向減去 Predict)
     odd = odd - alpha * (even + torch.roll(even, shifts=-1, dims=dim))
 
     return even, odd
 
+
 def split_even_odd(x: torch.Tensor, dim: int):
-    # 優化策略 1: 零拷貝視圖 (Zero-copy view) 取代 index_select
+    # 零拷貝拆分陣列 (視圖操作)
     shape = list(x.shape)
     shape[dim] = shape[dim] // 2
     shape.insert(dim + 1, 2)
@@ -172,21 +177,52 @@ def split_even_odd(x: torch.Tensor, dim: int):
 
 
 def merge_even_odd(even: torch.Tensor, odd: torch.Tensor, dim: int):
-    # 優化策略 2: 使用 C++ 底層高度優化的 stack 與 reshape，取代空矩陣賦值
+    # C++ 底層高速記憶體交錯排放
     shape = list(even.shape)
     shape[dim] = shape[dim] * 2
     return torch.stack([even, odd], dim=dim + 1).reshape(shape)
 
-class CDF97DWT3D(nn.Module):
+
+# ------------------------------------------------
+# ==============================================================================
+# 3. 空間堆疊工具 (處理張量拼接與拆分，以維持與原圖大小相同)
+# ==============================================================================
+def pack_octants(LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH):
+    """將 8 個次頻帶拼成一個完整的 3D 區塊"""
+    top_left = torch.cat([LLL, LLH], dim=4)  # W 軸
+    top_right = torch.cat([LHL, LHH], dim=4)
+    top = torch.cat([top_left, top_right], dim=3)  # H 軸
+
+    bot_left = torch.cat([HLL, HLH], dim=4)
+    bot_right = torch.cat([HHL, HHH], dim=4)
+    bot = torch.cat([bot_left, bot_right], dim=3)
+
+    return torch.cat([top, bot], dim=2)  # D 軸
+
+
+def unpack_octants(x):
+    """將 1 個完整 3D 區塊拆分為 8 個次頻帶"""
+    d2, h2, w2 = x.shape[2] // 2, x.shape[3] // 2, x.shape[4] // 2
+    LLL = x[:, :, :d2, :h2, :w2]
+    LLH = x[:, :, :d2, :h2, w2:]
+    LHL = x[:, :, :d2, h2:, :w2]
+    LHH = x[:, :, :d2, h2:, w2:]
+    HLL = x[:, :, d2:, :h2, :w2]
+    HLH = x[:, :, d2:, :h2, w2:]
+    HHL = x[:, :, d2:, h2:, :w2]
+    HHH = x[:, :, d2:, h2:, w2:]
+    return LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH
+
+class CDF53DWT3D(nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, x):
         n, c, d, h, w = x.shape
         if d % 2 or h % 2 or w % 2:
-            raise ValueError("D, H, W must be even for CDF 9/7 DWT.")
+            raise ValueError("D, H, W must be even for CDF 5/3 DWT.")
 
-        # 針對 D, H, W 三個維度依序執行 Lifting 分解
+        # 三個維度分別執行分解
         L_d, H_d = self.lift(x, dim=2)
 
         LL, LH = self.lift(L_d, dim=3)
@@ -197,27 +233,21 @@ class CDF97DWT3D(nn.Module):
         HLL, HLH = self.lift(HL, dim=4)
         HHL, HHH = self.lift(HH, dim=4)
 
-        # 將 8 個 Sub-band 疊合成與您原本網路架構相容的型態 (N, C, 8, D/2, H/2, W/2)
-        # out = torch.stack([LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH], dim=2)
-        out = (LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH)
-        return out
+        return (LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH)
 
     def lift(self, x, dim):
-        # 使用極速拆分與融合運算核心
         even, odd = split_even_odd(x, dim)
         return lift_core_dwt(even, odd, dim)
 
 
-class CDF97IDWT3D(nn.Module):
+class CDF53IDWT3D(nn.Module):
     def __init__(self):
         super().__init__()
 
     def forward(self, coeffs):
-        # 取出 8 個 Sub-band
-        # LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH = torch.unbind(coeffs, dim=2)
         LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH = coeffs
 
-        # 依照完全相反順序 Inverse Lifting (W -> H -> D)
+        # 反向組合 (W -> H -> D 順序)
         LL = self.ilift(LLL, LLH, dim=4)
         LH = self.ilift(LHL, LHH, dim=4)
         HL = self.ilift(HLL, HLH, dim=4)
@@ -230,7 +260,6 @@ class CDF97IDWT3D(nn.Module):
         return x
 
     def ilift(self, low, high, dim):
-        # 使用極速還原與交疊核心
         even, odd = lift_core_idwt(low, high, dim)
         return merge_even_odd(even, odd, dim)
 
@@ -264,54 +293,6 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         return x
 
-class WaveletSelfAttention(nn.Module):
-    def __init__(
-            self,
-            dim: int,
-            num_heads: int = 8,
-            qkv_bias: bool = True,
-            proj_bias: bool = True,
-            num_wt_apply=2,
-            device=None,
-    ) -> None:
-        super().__init__()
-        self.dwt = CDF97DWT3D()
-        self.idwt = CDF97IDWT3D()
-        self.layer_norm = nn.LayerNorm(dim)
-        self.num_wt_apply = num_wt_apply
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.qkv = nn.Linear(dim, 3 * dim, bias=qkv_bias, device=device)
-        self.proj = nn.Linear(dim, dim, bias=proj_bias, device=device)
-        self.bandwidth_pe_shift = nn.Parameter(torch.zeros(1,8**self.num_wt_apply,dim).to(device))
-        self.bandwidth_pe_scale = nn.Parameter(torch.ones(1,8**self.num_wt_apply,dim).to(device))
-    def _attn(self, x):
-        qkv = self.qkv(self.bandwidth_pe_scale * x + self.bandwidth_pe_shift)
-        q, k, v = torch.chunk(qkv, 3, dim=-1)
-        attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v)
-        attn_out = self.proj(attn_out)
-        return attn_out
-    def apply_dwt(self, F):
-        for _ in range(self.num_wt_apply):
-            F = torch.cat(self.dwt(F), dim=1)
-        F = torch.chunk(F, 8 ** self.num_wt_apply, dim=1)
-        return F
-    def apply_idwt(self, F):
-        F = torch.cat(F, dim=1)
-        for i in range(self.num_wt_apply):
-            F = torch.chunk(F, 8, dim=1)
-            F = self.idwt(F)
-        return F
-    def forward(self, x: torch.Tensor):
-        x = self.apply_dwt(x)
-        x = torch.stack(x, dim=-1)
-        B, C, H, W, D, N = x.shape
-        x = x.permute(0, 2, 3, 4, 5, 1).contiguous().view(-1, N, C)
-        x = x + self._attn(self.layer_norm(x))
-        x = x.view(B, H, W, D, N, C).permute(0, 5, 1, 2, 3, 4).contiguous()
-        x = torch.unbind(x, dim=-1)
-        x = self.apply_idwt(x)
-        return x
 
 class FourierGlobalFilter(nn.Module):
     def __init__(
@@ -322,20 +303,120 @@ class FourierGlobalFilter(nn.Module):
         super().__init__()
         self.pe_dim = pe_dim
         self.attn_map = nn.Conv3d(self.pe_dim, dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.conv1x1 = nn.Conv3d(dim, dim, kernel_size=1, stride=1, padding=0, bias=False)
         self._init_weights()
 
     def _init_weights(self):
-        torch.nn.init.zeros_(self.attn_map.weight)
-        if self.attn_map.bias is not None:
-            nn.init.zeros_(self.attn_map.bias)
+        torch.nn.init.zeros_(self.conv1x1.weight)
+        if self.conv1x1.bias is not None:
+            nn.init.zeros_(self.conv1x1.bias)
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
         B, C, H, W, D = x.shape
-        with torch.autocast(device_type=x.device.type, enabled=False, dtype=torch.float32):
-            attn = self.attn_map(pe)
-            attn = torch.fft.rfftn(attn, dim=(-3, -2, -1), norm="ortho")
-            x = torch.fft.rfftn(x, dim=(-3, -2, -1), norm="ortho")
-            x = x * attn
-            x = torch.fft.irfftn(x, s=(H, W, D), dim=(-3, -2, -1), norm="ortho")
+        attn = self.attn_map(pe)
+        #with torch.autocast(device_type=x.device.type, enabled=False, dtype=torch.float32):
+        attn = torch.fft.rfftn(attn, dim=(-3, -2, -1), norm="ortho")
+        x = torch.fft.rfftn(x, dim=(-3, -2, -1), norm="ortho")
+        x = x * attn
+        x = torch.complex(self.conv1x1(x.real), self.conv1x1(x.imag))
+        x = torch.fft.irfftn(x, s=(H, W, D), dim=(-3, -2, -1), norm="ortho")
+        return x
+
+class WaveletSelfAttention(nn.Module):
+    def __init__(
+            self,
+            dim: int,
+            pe_dim: int,
+            num_heads: int = 8,
+            qkv_bias: bool = True,
+            proj_bias: bool = True,
+            wavelet_levels=2,
+            device=None,
+    ) -> None:
+        super().__init__()
+        self.dwt = CDF53DWT3D()
+        self.idwt = CDF53IDWT3D()
+        self.levels = wavelet_levels
+        self.total_bands = 7 * self.levels + 1
+        self.wavelet_feature_transform = nn.ModuleList([nn.Sequential(nn.Conv3d(dim, dim,1,bias=True),
+                                                      LayerNorm(dim)) for _ in range(self.total_bands)])
+        self.avg_pool = nn.AvgPool3d(kernel_size=2, stride=2, padding=0)
+        self.pe_conv = nn.Conv3d(pe_dim, dim, kernel_size=1, padding=0, bias=False)
+        self.wavelet_embedding = nn.Parameter(torch.randn(self.total_bands, dim), requires_grad=True)
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.qkv = nn.Conv3d(dim, 3 * dim, kernel_size=1, bias=qkv_bias, device=device)
+        self.proj = nn.Conv3d(dim, dim, kernel_size=1, bias=proj_bias, device=device)
+        self._init_weights()
+    def _init_weights(self):
+        torch.nn.init.trunc_normal_(self.qkv.weight, std=0.02)
+        if self.qkv.bias is not None:
+            nn.init.zeros_(self.qkv.bias)
+        torch.nn.init.trunc_normal_(self.proj.weight, std=0.02)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
+    def _attn(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+        B, C, H, W, D = x.shape
+        qkv = self.qkv(x + pe)
+        qkv = qkv.view(B, 3, self.num_heads, self.head_dim, H, W, D)
+        q, k, v = torch.unbind(qkv, 1)
+        q, k, v = q.flatten(-3).permute(0, 3, 1, 2), k.flatten(-3).permute(0, 3, 1, 2), v.flatten(-3).permute(0, 3, 1, 2)
+        attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v).permute(0, 2, 3, 1).contiguous()
+        attn_out = attn_out.view(B, C, H, W, D)
+        attn_out = self.proj(attn_out)
+        return attn_out
+    def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+        pe = self.pe_conv(pe)
+        high_bands_list = []
+        pe_bands_list = []
+        # 1. 遞迴拆解，收集各階的高頻部分
+
+        for i in range(self.levels):
+            bands = self.dwt(x)
+            x = bands[0]  # LLL 留作下一輪的輸入
+            high_bands = (self.wavelet_feature_transform[i * 7 + 1](bands[1]),
+                          self.wavelet_feature_transform[i * 7 + 2](bands[2]),
+                          self.wavelet_feature_transform[i * 7 + 3](bands[3]),
+                          self.wavelet_feature_transform[i * 7 + 4](bands[4]),
+                          self.wavelet_feature_transform[i * 7 + 5](bands[5]),
+                          self.wavelet_feature_transform[i * 7 + 6](bands[6]),
+                          self.wavelet_feature_transform[i * 7 + 7](bands[7]))
+            high_bands_list.append(high_bands)
+
+
+            pe = self.avg_pool(pe)
+            pe_bands = [pe + self.wavelet_embedding[i * 7 + 1][None, :, None, None, None],
+                        pe + self.wavelet_embedding[i * 7 + 2][None, :, None, None, None],
+                        pe + self.wavelet_embedding[i * 7 + 3][None, :, None, None, None],
+                        pe + self.wavelet_embedding[i * 7 + 4][None, :, None, None, None],
+                        pe + self.wavelet_embedding[i * 7 + 5][None, :, None, None, None],
+                        pe + self.wavelet_embedding[i * 7 + 6][None, :, None, None, None],
+                        pe + self.wavelet_embedding[i * 7 + 7][None, :, None, None, None]]
+            pe_bands_list.append(pe_bands)
+        # 2. 函數式組裝 (Functional Pack)，由最小張量拼回原本大小
+        x = self.wavelet_feature_transform[0](x)
+        pe = pe + self.wavelet_embedding[0][None, :, None, None, None]
+        for high_bands, pe_bands in zip(reversed(high_bands_list), reversed(pe_bands_list)):
+            x = pack_octants(x, *high_bands)
+            pe = pack_octants(pe, *pe_bands)
+
+        x = self._attn(x, pe)
+
+        d, h, w = x.shape[2:]
+        scale = 2 ** self.levels
+        curr_out = x[:, :, :d // scale, :h // scale, :w // scale]
+        # 2. 從內到外逐層還原
+        for level in reversed(range(1, self.levels + 1)):
+            scale_l = 2 ** (level - 1)
+            active_d, active_h, active_w = d // scale_l, h // scale_l, w // scale_l
+
+            # 將該層所在的包裝區塊讀出
+            region = x[:, :, :active_d, :active_h, :active_w]
+
+            # 拆解出該層的高頻部份 (不需要理會丟出來的原本 LLL，我們用剛才重建好的 curr_out 替換)
+            _, LLH, LHL, LHH, HLL, HLH, HHL, HHH = unpack_octants(region)
+
+            # 將上層還原好的 LLL 與這層的高頻結合，做一次 IDWT
+            curr_out = self.idwt((curr_out, LLH, LHL, LHH, HLL, HLH, HHL, HHH))
         return x
 
 class TransformerBlock(nn.Module):
@@ -346,17 +427,20 @@ class TransformerBlock(nn.Module):
         num_heads: int,
         temb_channels: int,
         ffn_ratio: int = 4,
-        qkv_bias: bool = False,
-        proj_bias: bool = False,
+        wavelet_levels: int = 3,
+        qkv_bias: bool = True,
+        proj_bias: bool = True,
         ffn_bias: bool = True,
         device=None,
     ) -> None:
         super().__init__()
         self.norm1_1 = AdaLN(dim, temb_channels)
         self.wavelet_attn = WaveletSelfAttention(dim,
+                                                 pe_dim,
                                                  num_heads=num_heads,
                                                  qkv_bias=qkv_bias,
                                                  proj_bias=proj_bias,
+                                                 wavelet_levels=wavelet_levels,
                                                  device=device, )
         self.norm1_2 = AdaLN(dim, temb_channels)
         self.fft_filter = FourierGlobalFilter(
@@ -372,11 +456,10 @@ class TransformerBlock(nn.Module):
             device=device,
         )
 
-    def forward(self, x: torch.Tensor, emb: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
-        x_attn = self.wavelet_attn(self.norm1_1(x, emb)) + self.fft_filter(self.norm1_2(x, emb), pe=pe)
+    def forward(self, x: torch.Tensor, emb:torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+        x_attn = x + self.wavelet_attn(self.norm1_1(x, emb), pe=pe) + self.fft_filter(self.norm1_2(x, emb), pe=pe)
         x_ffn = x_attn + self.mlp(self.norm2(x_attn, emb))
         return x_ffn
-
 
 class FinalLayer(nn.Module):
     """
@@ -449,4 +532,93 @@ class PatchEmbed(nn.Module):
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
+        return x
+
+class VisionTransformer(nn.Module):
+    def __init__(
+        self,
+        *,
+        patch_size = (4,4,4),
+        in_chans: int = 3,
+        out_chans: int = 3,
+        embed_dim: int = 768,
+        temb_channels: int = 256,
+        depth: int = 12,
+        num_heads: int = 12,
+        ffn_ratio: int = 4,
+        qkv_bias: bool = False,
+        proj_bias: bool = False,
+        ffn_bias: bool = True,
+        legendre_max_degree: int = 21,
+        device: Any | None = None,
+        **ignored_kwargs,
+    ):
+        super().__init__()
+        del ignored_kwargs
+
+        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        self.n_blocks = depth
+        self.num_heads = num_heads
+        self.patch_size = patch_size
+        self.legendre_max_degree = legendre_max_degree
+        self.pe_dim = math.comb(legendre_max_degree + 3, 3)
+
+        self.patch_embed = PatchEmbed(
+            patch_size=patch_size,
+            in_chans=in_chans,
+            embed_dim=embed_dim,
+        )
+        ffn_ratio_sequence = [ffn_ratio] * depth
+        blocks_list = [
+            TransformerBlock(
+                dim=embed_dim,
+                pe_dim=self.pe_dim,
+                num_heads=num_heads,
+                temb_channels=temb_channels,
+                ffn_ratio=ffn_ratio_sequence[i],
+                qkv_bias=qkv_bias,
+                proj_bias=proj_bias,
+                ffn_bias=ffn_bias,
+                device=device,
+            )
+            for i in range(depth)
+        ]
+
+        self.blocks = nn.ModuleList(blocks_list)
+
+        self.out_channels = out_chans
+        self.final_layer = FinalLayer(embed_dim,
+                                      patch_size,
+                                      self.out_channels,
+                                      temb_channels,)
+
+    def _get_pe(self, H, W, D, device):
+        x_coords = torch.linspace(-1, 1, steps=H, device=device)
+        y_coords = torch.linspace(-1, 1, steps=W, device=device)
+        z_coords = torch.linspace(-1, 1, steps=D, device=device)
+        X, Y, Z = torch.meshgrid(x_coords, y_coords, z_coords, indexing='ij')
+        coords = torch.stack([X.reshape(-1), Y.reshape(-1), Z.reshape(-1)], dim=-1)
+        embeddings = generate_3d_legendre_pe(coords, self.legendre_max_degree)
+        embeddings = embeddings.view(H, W, D, -1)
+        embeddings = embeddings.permute(-1,0,1,2).unsqueeze(0)
+        return embeddings
+
+
+    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
+        x = self.patch_embed(x, emb)
+        B, C, H, W, D = x.shape
+
+        pe = self._get_pe(H, W, D, x.device)
+        for _, blk in enumerate(self.blocks):
+            x = blk(x, emb, pe=pe)
+        x = self.final_layer(x, emb)
+        x = x.reshape(shape=(B,self.out_channels,
+                             self.patch_embed.patch_size[0], self.patch_embed.patch_size[1],self.patch_embed.patch_size[2],
+                             H, W, D,))
+        x = torch.einsum('ncpqkhwd->nchpwqdk', x)
+        x = x.reshape(shape=(x.shape[0],
+                                self.out_channels,
+                                H * self.patch_embed.patch_size[0],
+                                W * self.patch_embed.patch_size[1],
+                                D * self.patch_embed.patch_size[2]))
         return x
