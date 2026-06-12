@@ -399,7 +399,7 @@ def run_inference(
                               modality_tensor)
 
         with torch.inference_mode(), torch.autocast(
-                device_type=device.type, enabled=True, dtype=torch.bfloat16
+                device_type=device.type, enabled=False, dtype=torch.float32
         ):
             for t, next_t in zip(all_timesteps, all_next_timesteps):
                 mu_t = ode_solver(model_wrapper, t, next_t - t, mu_t)
