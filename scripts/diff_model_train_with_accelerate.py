@@ -221,7 +221,7 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
                out_channels=4,
                cond_emb_dim=256,
                time_embed_dim=64,
-               include_spacing_input=True,)
+               include_spacing_input=False,)
 
     # Optional: Convert BatchNorm to SyncBatchNorm for DDP
     # if accelerator.num_processes > 1:

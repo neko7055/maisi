@@ -93,7 +93,7 @@ def load_models(
                out_channels=4,
                cond_emb_dim=256,
                time_embed_dim=64,
-               include_spacing_input=True).to(device)
+               include_spacing_input=False).to(device)
     checkpoint = torch.load(
         f"{args.model_dir}/{args.model_filename}",
         map_location=device,
