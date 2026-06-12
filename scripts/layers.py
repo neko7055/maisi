@@ -414,7 +414,7 @@ class WaveletSelfAttention(nn.Module):
 
             # 將上層還原好的 LLL 與這層的高頻結合，做一次 IDWT
             curr_out = self.idwt((curr_out, LLH, LHL, LHH, HLL, HLH, HHL, HHH))
-        return x
+        return curr_out
 
 class TransformerBlock(nn.Module):
     def __init__(
