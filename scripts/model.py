@@ -54,7 +54,7 @@ class VisionTransformer(nn.Module):
     def __init__(
             self,
             *,
-            patch_levels=1,
+            patch_size=(2, 2, 2),
             in_chans: int = 3,
             out_chans: int = 3,
             embed_dim: int = 768,
@@ -75,15 +75,14 @@ class VisionTransformer(nn.Module):
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.n_blocks = depth
         self.num_heads = num_heads
-        self.patch_size = 2**patch_levels
+        self.patch_size = patch_size
         self.legendre_max_degree = legendre_max_degree
         self.pe_dim = math.comb(legendre_max_degree + 3, 3)
 
         self.patch_embed = PatchEmbed(
-            patch_levels=patch_levels,
+            patch_size=patch_size,
             in_chans=in_chans,
             embed_dim=embed_dim,
-            temb_channels=temb_channels,
         )
         ffn_ratio_sequence = [ffn_ratio] * depth
         blocks_list = [
@@ -121,7 +120,7 @@ class VisionTransformer(nn.Module):
         return embeddings
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
-        x = self.patch_embed(x, emb)
+        x = self.patch_embed(x)
         B, C, H, W, D = x.shape
 
         pe = self._get_pe(H, W, D, x.device)
@@ -168,7 +167,7 @@ class Net(nn.Module):
             self.spacing_layer = self._create_embedding_module(3, self.cond_emb_dim)
             self.cond_emb_dim += self.cond_emb_dim
 
-        self.vit = VisionTransformer(patch_levels=1,
+        self.vit = VisionTransformer(patch_size=(2, 2, 2),
                                      in_chans=4,
                                      out_chans=4,
                                      embed_dim=1024,

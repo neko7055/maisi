@@ -493,54 +493,30 @@ class FinalLayer(nn.Module):
         return x
 
 class PatchEmbed(nn.Module):
-    """
-    2D image to patch embedding: (B,C,H,W) -> (B,N,D)
-
-    Args:
-        patch_size: Patch token size.
-        in_chans: Number of input image channels.
-        embed_dim: Number of linear projection output channels.
-        norm_layer: Normalization layer.
-    """
-
     def __init__(
         self,
-        patch_levels: int,
-        in_chans: int,
-        embed_dim: int,
-        temb_channels: int,
-        eps: float = 1e-6,
+        patch_size: Union[int, Tuple[int, int, int]] = 16,
+        in_chans: int = 4,
+        embed_dim: int = 768,
     ) -> None:
         super().__init__()
-        self.patch_levels = patch_levels
-
-        self.patch_size = (2**self.patch_levels, 2**self.patch_levels, 2**self.patch_levels)
-        self.dwt = CDF53DWT3D()
+        patch_HWD: Tuple[int, int, int] = make_3tuple(patch_size)
+        self.patch_size = patch_HWD
+        kernel_size = (self.patch_size[0]*3, self.patch_size[1]*3, self.patch_size[2]*3)
+        padding_size = (self.patch_size[0], self.patch_size[1], self.patch_size[2])
         self.in_chans = in_chans
         self.embed_dim = embed_dim
-        self.proj = nn.Conv3d((8**self.patch_levels) * in_chans,
-                              embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
-        self.norm = AdaLN(embed_dim, temb_channels)
-        self._init_weights()
+        self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=kernel_size, stride=patch_HWD, padding=padding_size)
 
-    def _init_weights(self):
-       w = self.proj.weight.data
-       nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-       if self.proj.bias is not None:
-           nn.init.constant_(self.proj.bias, 0)
-
-    def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
-        for _ in range(self.patch_levels):
-            x = torch.cat(self.dwt(x),dim=1)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
-        x = self.norm(x, emb)
         return x
 
 class VisionTransformer(nn.Module):
     def __init__(
             self,
             *,
-            patch_levels=1,
+            patch_size=(2, 2, 2),
             in_chans: int = 3,
             out_chans: int = 3,
             embed_dim: int = 768,
@@ -561,15 +537,14 @@ class VisionTransformer(nn.Module):
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.n_blocks = depth
         self.num_heads = num_heads
-        self.patch_size = 2**patch_levels
+        self.patch_size = patch_size
         self.legendre_max_degree = legendre_max_degree
         self.pe_dim = math.comb(legendre_max_degree + 3, 3)
 
         self.patch_embed = PatchEmbed(
-            patch_levels=patch_levels,
+            patch_size=patch_size,
             in_chans=in_chans,
             embed_dim=embed_dim,
-            temb_channels=temb_channels,
         )
         ffn_ratio_sequence = [ffn_ratio] * depth
         blocks_list = [
@@ -607,7 +582,7 @@ class VisionTransformer(nn.Module):
         return embeddings
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
-        x = self.patch_embed(x, emb)
+        x = self.patch_embed(x)
         B, C, H, W, D = x.shape
 
         pe = self._get_pe(H, W, D, x.device)
