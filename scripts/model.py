@@ -104,7 +104,7 @@ class VisionTransformer(nn.Module):
 
         self.out_channels = out_chans
         self.final_layer = FinalLayer(embed_dim,
-                                      patch_size,
+                                      self.patch_size,
                                       self.out_channels,
                                       temb_channels, )
 
@@ -128,15 +128,16 @@ class VisionTransformer(nn.Module):
             x = blk(x, emb, pe=pe)
         x = self.final_layer(x, emb)
         x = x.reshape(shape=(B, self.out_channels,
-                             self.patch_embed.patch_size[0], self.patch_embed.patch_size[1],
-                             self.patch_embed.patch_size[2],
+                             self.final_layer.patch_size[0],
+                             self.final_layer.patch_size[1],
+                             self.final_layer.patch_size[2],
                              H, W, D,))
         x = torch.einsum('ncpqkhwd->nchpwqdk', x)
         x = x.reshape(shape=(x.shape[0],
                              self.out_channels,
-                             H * self.patch_embed.patch_size[0],
-                             W * self.patch_embed.patch_size[1],
-                             D * self.patch_embed.patch_size[2]))
+                             H * self.final_layer.patch_size[0],
+                             W * self.final_layer.patch_size[1],
+                             D * self.final_layer.patch_size[2]))
         return x
 
 class Net(nn.Module):
