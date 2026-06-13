@@ -343,6 +343,10 @@ class WaveletSelfAttention(nn.Module):
         self.head_dim = dim // num_heads
         self.qkv = nn.Conv3d(dim, 3 * dim, kernel_size=1, bias=qkv_bias, device=device)
         self.proj = nn.Conv3d(dim, dim, kernel_size=1, bias=proj_bias, device=device)
+        self.channel_gate = nn.Sequential(nn.Conv3d(dim, dim, kernel_size=1, bias=True, device=device),
+                                          nn.LeakyReLU(),
+                                          nn.Conv3d(dim, 1, kernel_size=1, bias=True, device=device),
+                                          nn.Sigmoid())
         self._init_weights()
     def _init_weights(self):
         torch.nn.init.trunc_normal_(self.qkv.weight, std=0.02)
@@ -396,7 +400,7 @@ class WaveletSelfAttention(nn.Module):
             x = pack_octants(x, *high_bands)
             pe = pack_octants(pe, *pe_bands)
 
-        x = self._attn(x, pe)
+        x = self.channel_gate(x) * self._attn(x, pe)
 
         d, h, w = x.shape[2:]
         scale = 2 ** self.levels
