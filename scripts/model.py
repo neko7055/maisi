@@ -75,7 +75,7 @@ class VisionTransformer(nn.Module):
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.n_blocks = depth
         self.num_heads = num_heads
-        self.patch_size = patch_size
+        self.patch_size = 2**patch_levels
         self.legendre_max_degree = legendre_max_degree
         self.pe_dim = math.comb(legendre_max_degree + 3, 3)
 
