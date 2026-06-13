@@ -505,9 +505,10 @@ class PatchEmbed(nn.Module):
 
     def __init__(
         self,
-        patch_levels: int = 1,
-        in_chans: int = 4,
-        embed_dim: int = 768,
+        patch_levels: int,
+        in_chans: int,
+        embed_dim: int,
+        temb_channels: int,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
@@ -519,18 +520,20 @@ class PatchEmbed(nn.Module):
         self.embed_dim = embed_dim
         self.proj = nn.Conv3d((8**self.patch_levels) * in_chans,
                               embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
-    #     self._init_weights()
-    #
-    # def _init_weights(self):
-    #    w = self.proj.weight.data
-    #    nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-    #    if self.proj.bias is not None:
-    #        nn.init.constant_(self.proj.bias, 0)
+        self.norm = AdaLN(embed_dim, temb_channels)
+        self._init_weights()
+
+    def _init_weights(self):
+       w = self.proj.weight.data
+       nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+       if self.proj.bias is not None:
+           nn.init.constant_(self.proj.bias, 0)
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
         for _ in range(self.patch_levels):
             x = torch.cat(self.dwt(x),dim=1)
         x = self.proj(x)
+        x = self.norm(x, emb)
         return x
 
 class VisionTransformer(nn.Module):
@@ -566,6 +569,7 @@ class VisionTransformer(nn.Module):
             patch_levels=patch_levels,
             in_chans=in_chans,
             embed_dim=embed_dim,
+            temb_channels=temb_channels,
         )
         ffn_ratio_sequence = [ffn_ratio] * depth
         blocks_list = [

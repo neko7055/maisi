@@ -83,6 +83,7 @@ class VisionTransformer(nn.Module):
             patch_levels=patch_levels,
             in_chans=in_chans,
             embed_dim=embed_dim,
+            temb_channels=temb_channels,
         )
         ffn_ratio_sequence = [ffn_ratio] * depth
         blocks_list = [
