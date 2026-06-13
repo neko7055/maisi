@@ -179,17 +179,7 @@ def prepare_data(
             "translate_range": (16, 16, 16),  # 百分比平移可以搭配前述技巧
             "mode": ("bilinear", "bilinear"),
         }
-        augment = monai.transforms.OneOf(
-            transforms=[
-                # 模式 A：使用 border，權重設為 0.5 (佔 50% 機率)
-                monai.transforms.RandAffined(padding_mode="border", **affine_kwargs),
-
-                # 模式 B：使用 reflect，權重設為 0.5 (佔 50% 機率)
-                monai.transforms.RandAffined(padding_mode="reflect", **affine_kwargs),
-            ],
-            weights=[0.5, 0.5]  # 權重會自動歸一化，可依需求調整如 [0.7, 0.3]
-        )
-        train_transforms_list += [augment]
+        train_transforms_list += [monai.transforms.RandAffined(padding_mode="border", **affine_kwargs)]
     train_transforms = Compose(train_transforms_list)
 
     train_ds = monai.data.Dataset(

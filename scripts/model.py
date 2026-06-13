@@ -54,7 +54,7 @@ class VisionTransformer(nn.Module):
     def __init__(
             self,
             *,
-            patch_size=(4, 4, 4),
+            patch_levels=1,
             in_chans: int = 3,
             out_chans: int = 3,
             embed_dim: int = 768,
@@ -80,7 +80,7 @@ class VisionTransformer(nn.Module):
         self.pe_dim = math.comb(legendre_max_degree + 3, 3)
 
         self.patch_embed = PatchEmbed(
-            patch_size=patch_size,
+            patch_levels=patch_levels,
             in_chans=in_chans,
             embed_dim=embed_dim,
         )

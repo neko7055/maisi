@@ -505,24 +505,20 @@ class PatchEmbed(nn.Module):
 
     def __init__(
         self,
-        patch_size: Union[int, Tuple[int, int, int]] = 16,
+        patch_levels: int = 1,
         in_chans: int = 4,
         embed_dim: int = 768,
         eps: float = 1e-6,
     ) -> None:
         super().__init__()
+        self.patch_levels = patch_levels
 
-        patch_HWD: Tuple[int, int, int] = make_3tuple(patch_size)
-
-        self.patch_size = patch_HWD
-        kernel_size = (self.patch_size[0]*3, self.patch_size[1]*3, self.patch_size[2]*3)
-        padding_size = (self.patch_size[0], self.patch_size[1], self.patch_size[2])
-
-        #kernel_size = (self.patch_size[0], self.patch_size[1], self.patch_size[2])
-        #padding_size = (0, 0, 0)
+        self.patch_size = (2**self.patch_levels, 2**self.patch_levels, 2**self.patch_levels)
+        self.dwt = CDF53DWT3D()
         self.in_chans = in_chans
         self.embed_dim = embed_dim
-        self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=kernel_size, stride=patch_HWD, padding=padding_size)
+        self.proj = nn.Conv3d((8**self.patch_levels) * in_chans,
+                              embed_dim, kernel_size=1, stride=1, padding=0, bias=True)
     #     self._init_weights()
     #
     # def _init_weights(self):
@@ -532,6 +528,8 @@ class PatchEmbed(nn.Module):
     #        nn.init.constant_(self.proj.bias, 0)
 
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> torch.Tensor:
+        for _ in range(self.patch_levels):
+            x = torch.cat(self.dwt(x),dim=1)
         x = self.proj(x)
         return x
 
@@ -539,7 +537,7 @@ class VisionTransformer(nn.Module):
     def __init__(
         self,
         *,
-        patch_size = (4,4,4),
+        patch_levels = 1,
         in_chans: int = 3,
         out_chans: int = 3,
         embed_dim: int = 768,
@@ -565,7 +563,7 @@ class VisionTransformer(nn.Module):
         self.pe_dim = math.comb(legendre_max_degree + 3, 3)
 
         self.patch_embed = PatchEmbed(
-            patch_size=patch_size,
+            patch_levels=patch_levels,
             in_chans=in_chans,
             embed_dim=embed_dim,
         )
