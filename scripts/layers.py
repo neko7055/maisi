@@ -412,7 +412,7 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, emb:torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
-        x_attn = x + self.mbconv(self.norm1(x, emb), pe=pe
+        x_attn = x + self.mbconv(self.norm1(x, emb), pe=pe)
         x_ffn = x_attn + self.mlp(self.norm2(x_attn, emb))
         return x_ffn
 
