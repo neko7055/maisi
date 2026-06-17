@@ -302,7 +302,8 @@ class FourierGlobalFilter(nn.Module):
     ):
         super().__init__()
         self.pe_dim = pe_dim
-        self.attn_map = nn.Conv3d(self.pe_dim, dim, kernel_size=1, stride=1, padding=0, bias=True)
+        self.dim = dim
+        self.attn_map = nn.Conv3d(self.pe_dim, self.dim, kernel_size=1, stride=1, padding=0, bias=False)
         self._init_weights()
 
     def _init_weights(self):
@@ -311,114 +312,74 @@ class FourierGlobalFilter(nn.Module):
             nn.init.zeros_(self.attn_map.bias)
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
         B, C, H, W, D = x.shape
-        attn = self.attn_map(pe)
-        attn = torch.fft.rfftn(attn, dim=(-3, -2, -1), norm="ortho")
+        weight = self.attn_map(pe)
+        weight = torch.fft.rfftn(weight, dim=(-3, -2, -1), norm="ortho")
         x = torch.fft.rfftn(x, dim=(-3, -2, -1), norm="ortho")
-        x = x * attn
+        x = x * weight
         x = torch.fft.irfftn(x, s=(H, W, D), dim=(-3, -2, -1), norm="ortho")
         return x
 
-class WaveletSelfAttention(nn.Module):
+class WTConv(nn.Module):
     def __init__(
             self,
             dim: int,
-            pe_dim: int,
-            num_heads: int = 8,
-            qkv_bias: bool = True,
-            proj_bias: bool = True,
             wavelet_levels=2,
-            device=None,
     ) -> None:
         super().__init__()
         self.dwt = CDF53DWT3D()
         self.idwt = CDF53IDWT3D()
         self.levels = wavelet_levels
-        self.total_bands = 7 * self.levels + 1
-        self.wavelet_feature_transform = nn.ModuleList([nn.Sequential(nn.Conv3d(dim, dim,1,bias=True),
-                                                      LayerNorm(dim)) for _ in range(self.total_bands)])
-        self.avg_pool = nn.AvgPool3d(kernel_size=2, stride=2, padding=0)
-        self.pe_conv = nn.Conv3d(pe_dim, dim, kernel_size=1, padding=0, bias=False)
-        self.wavelet_embedding = nn.Parameter(torch.randn(self.total_bands, dim), requires_grad=True)
-        self.num_heads = num_heads
-        self.head_dim = dim // num_heads
-        self.qkv = nn.Conv3d(dim, 3 * dim, kernel_size=1, bias=qkv_bias, device=device)
-        self.proj = nn.Conv3d(dim, dim, kernel_size=1, bias=proj_bias, device=device)
-        self.channel_gate = nn.Sequential(nn.Conv3d(dim, dim, kernel_size=1, bias=True, device=device),
-                                          nn.LeakyReLU(),
-                                          nn.Conv3d(dim, 1, kernel_size=1, bias=True, device=device),
-                                          nn.Sigmoid())
-        self._init_weights()
-    def _init_weights(self):
-        torch.nn.init.trunc_normal_(self.qkv.weight, std=0.02)
-        if self.qkv.bias is not None:
-            nn.init.zeros_(self.qkv.bias)
-        torch.nn.init.trunc_normal_(self.proj.weight, std=0.02)
-        if self.proj.bias is not None:
-            nn.init.zeros_(self.proj.bias)
-    def _attn(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
-        B, C, H, W, D = x.shape
-        qkv = self.qkv(x + pe)
-        qkv = qkv.view(B, 3, self.num_heads, self.head_dim, H, W, D)
-        q, k, v = torch.unbind(qkv, 1)
-        q, k, v = q.flatten(-3).permute(0, 3, 1, 2), k.flatten(-3).permute(0, 3, 1, 2), v.flatten(-3).permute(0, 3, 1, 2)
-        attn_out = torch.nn.functional.scaled_dot_product_attention(q, k, v).permute(0, 2, 3, 1).contiguous()
-        attn_out = attn_out.view(B, C, H, W, D)
-        attn_out = self.proj(attn_out)
-        return attn_out
-    def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
-        pe = self.pe_conv(pe)
+        self.dim = dim
+        self.convs = nn.ModuleList([nn.Conv3d(dim, dim, groups=dim,
+                                              kernel_size=3,stride=1,padding=1, bias=False) for _ in range(8 * self.levels)])
+        self.apply(self._init_weights)
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv3d):
+            torch.nn.init.zeros_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         high_bands_list = []
-        pe_bands_list = []
-        # 1. 遞迴拆解，收集各階的高頻部分
-
         for i in range(self.levels):
             bands = self.dwt(x)
-            x = bands[0]  # LLL 留作下一輪的輸入
-            high_bands = (self.wavelet_feature_transform[i * 7 + 1](bands[1]),
-                          self.wavelet_feature_transform[i * 7 + 2](bands[2]),
-                          self.wavelet_feature_transform[i * 7 + 3](bands[3]),
-                          self.wavelet_feature_transform[i * 7 + 4](bands[4]),
-                          self.wavelet_feature_transform[i * 7 + 5](bands[5]),
-                          self.wavelet_feature_transform[i * 7 + 6](bands[6]),
-                          self.wavelet_feature_transform[i * 7 + 7](bands[7]))
-            high_bands_list.append(high_bands)
+            x = bands[0]
+            high_bands_list.append(bands[1:])
+        for i,high_bands in enumerate(reversed(high_bands_list)):
+            LLH, LHL, LHH, HLL, HLH, HHL, HHH = high_bands
+            x   = self.convs[i*8 + 0](x)
+            LLH = self.convs[i*8 + 1](LLH)
+            LHL = self.convs[i*8 + 2](LHL)
+            LHH = self.convs[i*8 + 3](LHH)
+            HLL = self.convs[i*8 + 4](HLL)
+            HLH = self.convs[i*8 + 5](HLH)
+            HHL = self.convs[i*8 + 6](HHL)
+            HHH = self.convs[i*8 + 7](HHH)
+            x = self.idwt((x, LLH, LHL, LHH, HLL, HLH, HHL, HHH))
+        return x
 
+class MBConv(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        pe_dim: int,
+        act_layer: Callable[..., nn.Module] = nn.SiLU,
+        bias: bool = True,
+        device=None,
+    ) -> None:
+        super().__init__()
+        hidden_dim = dim #* ffn_ratio
+        self.pw1 = nn.Conv3d(dim, hidden_dim, kernel_size=1, stride=1, padding=0, bias=False, device=device)
+        self.act = act_layer()
+        self.dw1 = FourierGlobalFilter(hidden_dim, pe_dim)
+        self.dw2 = WTConv(hidden_dim, 2)
+        self.pw2 = nn.Conv3d(hidden_dim, dim, kernel_size=1, stride=1, padding=0, bias=bias, device=device)
 
-            pe = self.avg_pool(pe)
-            pe_bands = [pe + self.wavelet_embedding[i * 7 + 1][None, :, None, None, None],
-                        pe + self.wavelet_embedding[i * 7 + 2][None, :, None, None, None],
-                        pe + self.wavelet_embedding[i * 7 + 3][None, :, None, None, None],
-                        pe + self.wavelet_embedding[i * 7 + 4][None, :, None, None, None],
-                        pe + self.wavelet_embedding[i * 7 + 5][None, :, None, None, None],
-                        pe + self.wavelet_embedding[i * 7 + 6][None, :, None, None, None],
-                        pe + self.wavelet_embedding[i * 7 + 7][None, :, None, None, None]]
-            pe_bands_list.append(pe_bands)
-        # 2. 函數式組裝 (Functional Pack)，由最小張量拼回原本大小
-        x = self.wavelet_feature_transform[0](x)
-        pe = pe + self.wavelet_embedding[0][None, :, None, None, None]
-        for high_bands, pe_bands in zip(reversed(high_bands_list), reversed(pe_bands_list)):
-            x = pack_octants(x, *high_bands)
-            pe = pack_octants(pe, *pe_bands)
-
-        x = self.channel_gate(x) * self._attn(x, pe)
-
-        d, h, w = x.shape[2:]
-        scale = 2 ** self.levels
-        curr_out = x[:, :, :d // scale, :h // scale, :w // scale]
-        # 2. 從內到外逐層還原
-        for level in reversed(range(1, self.levels + 1)):
-            scale_l = 2 ** (level - 1)
-            active_d, active_h, active_w = d // scale_l, h // scale_l, w // scale_l
-
-            # 將該層所在的包裝區塊讀出
-            region = x[:, :, :active_d, :active_h, :active_w]
-
-            # 拆解出該層的高頻部份 (不需要理會丟出來的原本 LLL，我們用剛才重建好的 curr_out 替換)
-            _, LLH, LHL, LHH, HLL, HLH, HHL, HHH = unpack_octants(region)
-
-            # 將上層還原好的 LLL 與這層的高頻結合，做一次 IDWT
-            curr_out = self.idwt((curr_out, LLH, LHL, LHH, HLL, HLH, HHL, HHH))
-        return curr_out
+    def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+        x = self.pw1(x)
+        x = self.dw1(x, pe) + self.dw2(x)
+        x = self.act(x)
+        x = self.pw2(x)
+        return x
 
 class TransformerBlock(nn.Module):
     def __init__(
@@ -435,19 +396,12 @@ class TransformerBlock(nn.Module):
         device=None,
     ) -> None:
         super().__init__()
-        self.norm1_1 = AdaLN(dim, temb_channels)
-        self.wavelet_attn = WaveletSelfAttention(dim,
-                                                 pe_dim,
-                                                 num_heads=num_heads,
-                                                 qkv_bias=qkv_bias,
-                                                 proj_bias=proj_bias,
-                                                 wavelet_levels=wavelet_levels,
-                                                 device=device, )
-        self.norm1_2 = AdaLN(dim, temb_channels)
-        self.fft_filter = FourierGlobalFilter(
-            dim,
-            pe_dim,
-        )
+        self.norm1 = AdaLN(dim, temb_channels)
+        self.mbconv = MBConv(dim,
+                             pe_dim,
+                             act_layer=partial(nn.GELU, approximate="tanh"),
+                             bias=True,
+                             device=device)
         self.norm2 = AdaLN(dim, temb_channels)
         self.mlp = Mlp(
             in_features=dim,
@@ -458,7 +412,7 @@ class TransformerBlock(nn.Module):
         )
 
     def forward(self, x: torch.Tensor, emb:torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
-        x_attn = x + self.wavelet_attn(self.norm1_1(x, emb), pe=pe) + self.fft_filter(self.norm1_2(x, emb), pe=pe)
+        x_attn = x + self.mbconv(self.norm1(x, emb), pe=pe
         x_ffn = x_attn + self.mlp(self.norm2(x_attn, emb))
         return x_ffn
 
