@@ -12,6 +12,12 @@ import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
 
+dtype_dict = {
+    "fp32": torch.float32,
+    "fp16": torch.float16,
+    "bf16": torch.bfloat16,
+}
+
 def make_2tuple(x: tuple[int, int] | int):
     if isinstance(x, tuple):
         assert len(x) == 2
@@ -27,18 +33,6 @@ def make_3tuple(x: tuple[int, int, int] | int):
 
     assert isinstance(x, int)
     return x, x, x
-
-def legendre_time_embedding(timesteps: torch.Tensor, embedding_dim: int):
-    if timesteps.ndim != 1:
-        raise ValueError("Timesteps should be a 1d-array")
-    x = 2.0 * timesteps - 1.0
-    out = torch.zeros(x.shape[0], embedding_dim+1, device=x.device, dtype=x.dtype)
-    out[:, 0] = 1.0
-    out[:, 1] = x
-    for n in range(1, embedding_dim):
-        out[:, n + 1] = ((2 * n + 1) * x * out[:, n] - n * out[:, n - 1]) / (n + 1)
-    out = out[:, 1:]
-    return out
 
 def generate_3d_legendre_pe(coords: torch.Tensor, max_degree: int) -> torch.Tensor:
     """
@@ -95,173 +89,8 @@ def layer_norm(x, eps=1e-6):
     x = (x - u) * torch.rsqrt(s + eps)
     return x
 
-
-class LayerNorm(nn.Module):
-    def __init__(self, normalized_shape, eps=1e-6):
-        super().__init__()
-        self.weight = nn.Parameter(torch.ones(normalized_shape))
-        self.bias = nn.Parameter(torch.zeros(normalized_shape))
-        self.eps = eps
-    def forward(self, x):
-        x = layer_norm(x, self.eps)
-        x = self.weight[:, None, None, None] * x + self.bias[:, None, None, None]
-        return x
-
-class AdaLN(nn.Module):
-    def __init__(self, num_channels,
-                 emb_dim,
-                 eps=1e-6,
-                 act_fn: Callable[..., nn.Module]=nn.SiLU):
-        super().__init__()
-        self.eps = eps
-        self.linear = nn.Linear(emb_dim, num_channels * 2)
-        if act_fn is None:
-            self.act = None
-        else:
-            self.act = act_fn()
-
-        nn.init.zeros_(self.linear.weight)
-        nn.init.zeros_(self.linear.bias)
-
-    def forward(self, x, emb):
-        if self.act:
-            emb = self.act(emb)
-        emb = self.linear(emb)
-        while len(emb.shape) < len(x.shape):
-            emb = emb.unsqueeze(-1)
-        scale, shift = torch.chunk(emb, 2, dim=1)
-        h = layer_norm(x, self.eps)
-        return h * (1 + scale) + shift
-
-# ----------------- 效能優化區塊 (Lifting Scheme) -----------------
-def lift_core_dwt(even: torch.Tensor, odd: torch.Tensor, dim: int):
-    # CDF 5/3 (Bior 2.2) 提升係數
-    alpha = -0.5
-    beta = 0.25
-    K = 1.4142135623730951  # math.sqrt(2)
-
-    # Step 1: Predict
-    odd = odd + alpha * (even + torch.roll(even, shifts=-1, dims=dim))
-
-    # Step 2: Update
-    even = even + beta * (odd + torch.roll(odd, shifts=1, dims=dim))
-
-    # Step 3: Scale
-    return even * K, odd * (1.0 / K)
-
-def lift_core_idwt(low: torch.Tensor, high: torch.Tensor, dim: int):
-    alpha = -0.5
-    beta = 0.25
-    K = 1.4142135623730951  # math.sqrt(2)
-
-    # Step 1: Inverse Scale
-    even = low * (1.0 / K)
-    odd = high * K
-
-    # Step 2: Inverse Update (反向減去 Update)
-    even = even - beta * (odd + torch.roll(odd, shifts=1, dims=dim))
-
-    # Step 3: Inverse Predict (反向減去 Predict)
-    odd = odd - alpha * (even + torch.roll(even, shifts=-1, dims=dim))
-
-    return even, odd
-
-
-def split_even_odd(x: torch.Tensor, dim: int):
-    # 零拷貝拆分陣列 (視圖操作)
-    shape = list(x.shape)
-    shape[dim] = shape[dim] // 2
-    shape.insert(dim + 1, 2)
-    x_view = x.reshape(shape)
-    return x_view.select(dim + 1, 0), x_view.select(dim + 1, 1)
-
-
-def merge_even_odd(even: torch.Tensor, odd: torch.Tensor, dim: int):
-    # C++ 底層高速記憶體交錯排放
-    shape = list(even.shape)
-    shape[dim] = shape[dim] * 2
-    return torch.stack([even, odd], dim=dim + 1).reshape(shape)
-
-
-# ------------------------------------------------
-# ==============================================================================
-# 3. 空間堆疊工具 (處理張量拼接與拆分，以維持與原圖大小相同)
-# ==============================================================================
-def pack_octants(LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH):
-    """將 8 個次頻帶拼成一個完整的 3D 區塊"""
-    top_left = torch.cat([LLL, LLH], dim=4)  # W 軸
-    top_right = torch.cat([LHL, LHH], dim=4)
-    top = torch.cat([top_left, top_right], dim=3)  # H 軸
-
-    bot_left = torch.cat([HLL, HLH], dim=4)
-    bot_right = torch.cat([HHL, HHH], dim=4)
-    bot = torch.cat([bot_left, bot_right], dim=3)
-
-    return torch.cat([top, bot], dim=2)  # D 軸
-
-
-def unpack_octants(x):
-    """將 1 個完整 3D 區塊拆分為 8 個次頻帶"""
-    d2, h2, w2 = x.shape[2] // 2, x.shape[3] // 2, x.shape[4] // 2
-    LLL = x[:, :, :d2, :h2, :w2]
-    LLH = x[:, :, :d2, :h2, w2:]
-    LHL = x[:, :, :d2, h2:, :w2]
-    LHH = x[:, :, :d2, h2:, w2:]
-    HLL = x[:, :, d2:, :h2, :w2]
-    HLH = x[:, :, d2:, :h2, w2:]
-    HHL = x[:, :, d2:, h2:, :w2]
-    HHH = x[:, :, d2:, h2:, w2:]
-    return LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH
-
-class CDF53DWT3D(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        n, c, d, h, w = x.shape
-        if d % 2 or h % 2 or w % 2:
-            raise ValueError("D, H, W must be even for CDF 5/3 DWT.")
-
-        # 三個維度分別執行分解
-        L_d, H_d = self.lift(x, dim=2)
-
-        LL, LH = self.lift(L_d, dim=3)
-        HL, HH = self.lift(H_d, dim=3)
-
-        LLL, LLH = self.lift(LL, dim=4)
-        LHL, LHH = self.lift(LH, dim=4)
-        HLL, HLH = self.lift(HL, dim=4)
-        HHL, HHH = self.lift(HH, dim=4)
-
-        return (LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH)
-
-    def lift(self, x, dim):
-        even, odd = split_even_odd(x, dim)
-        return lift_core_dwt(even, odd, dim)
-
-
-class CDF53IDWT3D(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, coeffs):
-        LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH = coeffs
-
-        # 反向組合 (W -> H -> D 順序)
-        LL = self.ilift(LLL, LLH, dim=4)
-        LH = self.ilift(LHL, LHH, dim=4)
-        HL = self.ilift(HLL, HLH, dim=4)
-        HH = self.ilift(HHL, HHH, dim=4)
-
-        L_d = self.ilift(LL, LH, dim=3)
-        H_d = self.ilift(HL, HH, dim=3)
-
-        x = self.ilift(L_d, H_d, dim=2)
-        return x
-
-    def ilift(self, low, high, dim):
-        even, odd = lift_core_idwt(low, high, dim)
-        return merge_even_odd(even, odd, dim)
+def modulate(x, shift, scale):
+    return x * (1 + scale[...,None,None,None]) + shift[...,None,None,None]
 
 class Mlp(nn.Module):
     def __init__(
@@ -293,6 +122,64 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         return x
 
+def linear_attn(Q: torch.Tensor,
+                K: torch.Tensor,
+                V: torch.Tensor,
+                eps: float = 1e-5):
+    # Step 1: phi() kernel，讓數值非負
+    Q_phi = F.elu(Q) + 1.0  # (B, heads, head_dim,  H, W, D)
+    K_phi = F.elu(K) + 1.0  # (B, heads, head_dim,  H, W, D)
+    KV = torch.einsum("b h d x y z, b h v x y z -> b h d v", K_phi, V)
+    numerator = torch.einsum("b h d x y z, b h d v -> b h v x y z", Q_phi, KV)
+    K_sum = K_phi.sum(dim=[-3, -2, -1])
+    Z = torch.einsum("b h d x y z, b h d -> b h x y z", Q_phi, K_sum)
+    Z = Z + eps
+    out = numerator / Z.unsqueeze(2)
+    return out
+
+class LinearAttention(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        pe_dim: int,
+        num_heads: int = 8,
+        qkv_bias: bool = True,
+        proj_bias: bool = True,
+        device=None,
+    ) -> None:
+        super().__init__()
+        assert dim % num_heads == 0, "Embedding dimension must be divisible by number of heads."
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.pe_dim = pe_dim
+        self.qk_pe_proj = nn.Conv3d(self.pe_dim, 2 * dim, kernel_size=1, stride=1, padding=0, bias=False, device=device)
+        self.qkv = nn.Conv3d(dim, 3 * dim, kernel_size=1,padding=0, bias=qkv_bias, device=device)
+        self.fft_dw = FourierGlobalFilter(dim, pe_dim)
+        self.proj = nn.Conv3d(dim, dim, kernel_size=1, bias=proj_bias, device=device)
+        self._init_weights()
+
+    def _init_weights(self):
+        torch.nn.init.trunc_normal_(self.qkv.weight, std=0.02)
+        if self.qkv.bias is not None:
+            nn.init.zeros_(self.qkv.bias)
+        torch.nn.init.trunc_normal_(self.proj.weight, std=0.02)
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
+
+    def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+        B, C, H, W, D = x.shape
+        qkv = self.qkv(x)
+        qkv = qkv.view(B, 3, self.num_heads, self.head_dim, H, W, D)
+        q, k, v = torch.unbind(qkv, 1)
+        q_pe, k_pe = self.qk_pe_proj(pe).chunk(2, dim=1)
+        q_pe = q_pe.view(1, self.num_heads, self.head_dim, H, W, D)
+        k_pe = k_pe.view(1, self.num_heads, self.head_dim, H, W, D)
+        q = q + q_pe
+        k = k + k_pe
+        attn_out = linear_attn(q, k, v)
+        attn_out = attn_out.view(B, C, H, W, D) + self.fft_dw(v.view(B, C, H, W, D), pe)
+        attn_out = self.proj(attn_out)
+        return attn_out
 
 class FourierGlobalFilter(nn.Module):
     def __init__(
@@ -319,68 +206,6 @@ class FourierGlobalFilter(nn.Module):
         x = torch.fft.irfftn(x, s=(H, W, D), dim=(-3, -2, -1), norm="ortho")
         return x
 
-class WTConv(nn.Module):
-    def __init__(
-            self,
-            dim: int,
-            wavelet_levels=2,
-    ) -> None:
-        super().__init__()
-        self.dwt = CDF53DWT3D()
-        self.idwt = CDF53IDWT3D()
-        self.levels = wavelet_levels
-        self.dim = dim
-        self.convs = nn.ModuleList([nn.Conv3d(dim, dim, groups=dim,
-                                              kernel_size=3,stride=1,padding=1, bias=False) for _ in range(8 * self.levels)])
-        self.apply(self._init_weights)
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv3d):
-            torch.nn.init.zeros_(m.weight)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        high_bands_list = []
-        for i in range(self.levels):
-            bands = self.dwt(x)
-            x = bands[0]
-            high_bands_list.append(bands[1:])
-        for i,high_bands in enumerate(reversed(high_bands_list)):
-            LLH, LHL, LHH, HLL, HLH, HHL, HHH = high_bands
-            x   = self.convs[i*8 + 0](x)
-            LLH = self.convs[i*8 + 1](LLH)
-            LHL = self.convs[i*8 + 2](LHL)
-            LHH = self.convs[i*8 + 3](LHH)
-            HLL = self.convs[i*8 + 4](HLL)
-            HLH = self.convs[i*8 + 5](HLH)
-            HHL = self.convs[i*8 + 6](HHL)
-            HHH = self.convs[i*8 + 7](HHH)
-            x = self.idwt((x, LLH, LHL, LHH, HLL, HLH, HHL, HHH))
-        return x
-
-class MBConv(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        pe_dim: int,
-        act_layer: Callable[..., nn.Module] = nn.SiLU,
-        bias: bool = True,
-        device=None,
-    ) -> None:
-        super().__init__()
-        hidden_dim = dim #* ffn_ratio
-        self.pw1 = nn.Conv3d(dim, hidden_dim, kernel_size=1, stride=1, padding=0, bias=False, device=device)
-        self.act = act_layer()
-        self.dw1 = FourierGlobalFilter(hidden_dim, pe_dim)
-        self.dw2 = WTConv(hidden_dim, 2)
-        self.pw2 = nn.Conv3d(hidden_dim, dim, kernel_size=1, stride=1, padding=0, bias=bias, device=device)
-
-    def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
-        x = self.pw1(x)
-        x = self.dw1(x, pe) + self.dw2(x)
-        x = self.act(x)
-        x = self.pw2(x)
-        return x
-
 class TransformerBlock(nn.Module):
     def __init__(
         self,
@@ -389,32 +214,37 @@ class TransformerBlock(nn.Module):
         num_heads: int,
         temb_channels: int,
         ffn_ratio: int = 4,
-        wavelet_levels: int = 3,
-        qkv_bias: bool = True,
-        proj_bias: bool = True,
+        qkv_bias: bool = False,
+        proj_bias: bool = False,
         ffn_bias: bool = True,
         device=None,
     ) -> None:
         super().__init__()
-        self.norm1 = AdaLN(dim, temb_channels)
-        self.mbconv = MBConv(dim,
-                             pe_dim,
-                             act_layer=partial(nn.GELU, approximate="tanh"),
-                             bias=True,
-                             device=device)
-        self.norm2 = AdaLN(dim, temb_channels)
-        self.mlp = Mlp(
-            in_features=dim,
-            ffn_ratio=ffn_ratio,
-            act_layer=partial(nn.GELU, approximate="tanh"),
-            bias=ffn_bias,
+        self.attn = LinearAttention(
+            dim,
+            pe_dim,
+            num_heads=num_heads,
+            qkv_bias=qkv_bias,
+            proj_bias=proj_bias,
             device=device,
         )
-
+        self.mlp = Mlp(dim,
+                       ffn_ratio,
+                       act_layer=partial(nn.GELU, approximate="tanh"),
+                       bias=ffn_bias,
+                       device=device)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(temb_channels, 6 * dim, bias=True)
+        )
+        nn.init.zeros_(self.adaLN_modulation[1].weight)
+        nn.init.zeros_(self.adaLN_modulation[1].bias)
     def forward(self, x: torch.Tensor, emb:torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
-        x_attn = x + self.mbconv(self.norm1(x, emb), pe=pe)
-        x_ffn = x_attn + self.mlp(self.norm2(x_attn, emb))
-        return x_ffn
+        (shift_msa, scale_msa, gate_msa,
+        shift_mlp, scale_mlp, gate_mlp)= self.adaLN_modulation(emb).chunk(6, dim=1)
+        x = x + gate_msa[...,None,None,None] * self.attn(modulate(layer_norm(x), shift_msa, scale_msa), pe=pe)
+        x = x + gate_mlp[...,None,None,None] * self.mlp(modulate(layer_norm(x), shift_mlp, scale_mlp))
+        return x
 
 class FinalLayer(nn.Module):
     """
@@ -428,13 +258,18 @@ class FinalLayer(nn.Module):
         self.patch_size = make_3tuple(patch_size)
         #kernel_size = (self.patch_size[0] * 3, self.patch_size[1] * 3, self.patch_size[2] * 3)
         #padding_size = (self.patch_size[0], self.patch_size[1], self.patch_size[2])
-        self.norm = AdaLN(hidden_size, temb_channels)
         self.linear = nn.Conv3d(hidden_size,
                                 self.patch_size[0] * self.patch_size[1] * self.patch_size[2] * out_channels,#
                                 kernel_size=1,
                                 stride=1,
                                 padding=0,
                                 bias=True)
+        self.adaLN_modulation = nn.Sequential(
+            nn.SiLU(),
+            nn.Linear(temb_channels, 2 * hidden_size, bias=True)
+        )
+        nn.init.zeros_(self.adaLN_modulation[1].weight)
+        nn.init.zeros_(self.adaLN_modulation[1].bias)
         self._init_weights()
 
     def _init_weights(self):
@@ -443,7 +278,8 @@ class FinalLayer(nn.Module):
             nn.init.constant_(self.linear.bias, 0)
 
     def forward(self, x, emb):
-        x = self.linear(self.norm(x, emb))
+        shift, scale = self.adaLN_modulation(emb).chunk(2, dim=1)
+        x = self.linear(modulate(layer_norm(x), shift, scale))
         return x
 
 class PatchEmbed(nn.Module):
@@ -454,10 +290,14 @@ class PatchEmbed(nn.Module):
         embed_dim: int = 768,
     ) -> None:
         super().__init__()
+
         patch_HWD: Tuple[int, int, int] = make_3tuple(patch_size)
+
         self.patch_size = patch_HWD
         kernel_size = (self.patch_size[0]*3, self.patch_size[1]*3, self.patch_size[2]*3)
         padding_size = (self.patch_size[0], self.patch_size[1], self.patch_size[2])
+        #kernel_size = (self.patch_size[0], self.patch_size[1], self.patch_size[2])
+        #padding_size = (0, 0, 0)
         self.in_chans = in_chans
         self.embed_dim = embed_dim
         self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=kernel_size, stride=patch_HWD, padding=padding_size)
@@ -465,6 +305,41 @@ class PatchEmbed(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
         return x
+
+def generate_patch_mask_3d(b, h, w, d, mask_ratio=0.5, device="cuda"):
+    mask = torch.bernoulli(
+        torch.full((b,1, h, w, d), mask_ratio, device=device)
+    )
+    return mask
+
+def patch_mask_to_voxel_mask(mask, pt, ph, pw):
+    """
+    mask: (B, Nt, Nh, Nw)
+    return:
+        voxel_mask: (B, 1, T, H, W)
+    """
+
+    B, Nt, Nh, Nw = mask.shape
+
+    # expand to patch volume
+    mask = mask[:, :, :, :, None, None, None]
+
+    mask = mask.expand(
+        B, Nt, Nh, Nw,
+        pt, ph, pw
+    )
+
+    # rearrange to voxel space
+    mask = mask.permute(0, 1, 4, 2, 5, 3, 6)
+
+    mask = mask.reshape(
+        B,
+        Nt * pt,
+        Nh * ph,
+        Nw * pw
+    )
+
+    return mask.float()
 
 class VisionTransformer(nn.Module):
     def __init__(
@@ -475,22 +350,20 @@ class VisionTransformer(nn.Module):
             out_chans: int = 3,
             embed_dim: int = 768,
             temb_channels: int = 256,
+            num_heads: int = 8,
             depth: int = 12,
-            num_heads: int = 12,
             ffn_ratio: int = 4,
             qkv_bias: bool = False,
-            proj_bias: bool = False,
+            proj_bias: bool = True,
             ffn_bias: bool = True,
-            legendre_max_degree: int = 21,
+            legendre_max_degree: int = 8,
             device: Any | None = None,
             **ignored_kwargs,
     ):
         super().__init__()
         del ignored_kwargs
-
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.n_blocks = depth
-        self.num_heads = num_heads
         self.patch_size = patch_size
         self.legendre_max_degree = legendre_max_degree
         self.pe_dim = math.comb(legendre_max_degree + 3, 3)
@@ -538,7 +411,6 @@ class VisionTransformer(nn.Module):
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
         x = self.patch_embed(x)
         B, C, H, W, D = x.shape
-
         pe = self._get_pe(H, W, D, x.device)
         for _, blk in enumerate(self.blocks):
             x = blk(x, emb, pe=pe)
