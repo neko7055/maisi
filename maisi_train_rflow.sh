@@ -10,7 +10,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL               # send email at job start, end, and on failure
 #SBATCH --mail-user=r12946008@ntu.edu.tw        # your address
 
-#SBATCH --time=01:00:00
+#SBATCH -time=1-00:00:00
 
 #SBATCH --export=ALL
 

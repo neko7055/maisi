@@ -1,8 +1,8 @@
 #!/bin/bash
 #SBATCH --job-name=rflow_infer
 #SBATCH --account=MST111121
-#SBATCH --partition=normal
-#SBATCH --gres=gpu:2
+#SBATCH --partition=dev
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
 #SBATCH --output=logs/rflow_infer_%j.out
 #SBATCH --error=logs/rflow_infer_%j.err

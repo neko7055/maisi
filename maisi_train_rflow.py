@@ -66,7 +66,7 @@ if __name__ == "__main__":
     model_config_path = os.path.join(configs_dir, "model_train_infer_config.json")
     model_def_path = os.path.join(configs_dir, "model_def.json")
 
-    accelerate_config_path = "./accelerate_configs/cuda_8gpu_1node_bf16.yaml"
+    accelerate_config_path = "./accelerate_configs/cuda_8gpu_1node.yaml"
 
     with open(env_config_path, "r") as f:
         env_config = json.load(f)

@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=preprocess_data
 #SBATCH --account=MST111121
-#SBATCH --partition=normal
+#SBATCH --partition=dev
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
 #SBATCH --output=logs/preprocess_%j.out
@@ -10,7 +10,7 @@
 #SBATCH --mail-type=BEGIN,END,FAIL               # send email at job start, end, and on failure
 #SBATCH --mail-user=r12946008@ntu.edu.tw        # your address
 
-#SBATCH --time=1-00:00:00
+#SBATCH --time=0-01:00:00
 
 #SBATCH --export=ALL
 

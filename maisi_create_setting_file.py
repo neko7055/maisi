@@ -52,21 +52,21 @@ os.makedirs(env_config_out["output_dir"], exist_ok=True)
 model_config_out = OrderedDict()
 
 model_config_out["transform_to_laten"] = OrderedDict()
-model_config_out["transform_to_laten"]["batch_size"] = 8
-model_config_out["transform_to_laten"]["sw_batch_size"] = 15 # 225 for h100
+model_config_out["transform_to_laten"]["batch_size"] = 2
+model_config_out["transform_to_laten"]["sw_batch_size"] = 15
 model_config_out["transform_to_laten"]["slide_window_size"] = [64, 64, 64]
 model_config_out["transform_to_laten"]["autoencoder_tp_num_splits"] = 1
 model_config_out["transform_to_laten"]["modality"] = "ct_non_contrast_to_contrast"
-model_config_out["transform_to_laten"]["num_workers"] = 4
+model_config_out["transform_to_laten"]["num_workers"] = 2
 
 model_config_out["diffusion_unet_train"] = OrderedDict()
-model_config_out["diffusion_unet_train"]["batch_size"] = 1 # 3 for h100
+model_config_out["diffusion_unet_train"]["batch_size"] = 1
 model_config_out["diffusion_unet_train"]["time_batch_size"]=1
 model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 1
 model_config_out["diffusion_unet_train"]["num_workers"] = 4
 model_config_out["diffusion_unet_train"]["lr"] = 0.0001
-model_config_out["diffusion_unet_train"]["n_epochs"] = 125
-model_config_out["diffusion_unet_train"]["num_inference_steps"] = 1
+model_config_out["diffusion_unet_train"]["n_epochs"] = 1000
+model_config_out["diffusion_unet_train"]["num_inference_steps"] = 10
 model_config_out["diffusion_unet_train"]["validation_batch_size"] = 8
 model_config_out["diffusion_unet_train"]["interpolate_mode"] = "linear" # [linear, triangular, polynomial, spacial] is valid
 model_config_out["diffusion_unet_train"]["ode_solver"] = "euler" # [euler, midpoint, rk4, rk5] is valid

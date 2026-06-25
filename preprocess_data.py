@@ -75,7 +75,7 @@ if __name__ == "__main__":
     data_split_json = os.path.join(raw_data_dir, "dataset_split.json")
     x=512
     y=512
-    z=256
+    z=512
     root_dir = "./"
     data_dir = os.path.join(root_dir, "CVAI_data"+ f"_x{x}"+ f"_y{y}" + f"_z{z}")
     os.makedirs(data_dir, exist_ok=True)

@@ -2,13 +2,15 @@
 #SBATCH --job-name=create_laten_data
 #SBATCH --account=MST111121
 #SBATCH --partition=normal
-#SBATCH --gres=gpu:2
+#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=12
 #SBATCH --output=logs/create_laten_data_%j.out
 #SBATCH --error=logs/create_laten_data_%j.err
 
 #SBATCH --mail-type=BEGIN,END,FAIL               # send email at job start, end, and on failure
 #SBATCH --mail-user=r12946008@ntu.edu.tw        # your address
+
+#SBATCH --time=0-15:00:00
 
 #SBATCH --export=ALL
 
