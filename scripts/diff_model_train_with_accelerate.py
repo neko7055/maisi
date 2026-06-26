@@ -223,25 +223,20 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
                time_embed_dim=64,
                include_spacing_input=False,)
 
-    # Optional: Convert BatchNorm to SyncBatchNorm for DDP
-    # if accelerator.num_processes > 1:
-    #     unet = torch.nn.SyncBatchNorm.convert_sync_batchnorm(unet)
-    # logger.info("Training from scratch.")
-    # if args.existing_ckpt_filepath is None:
-    #     logger.info("Training from scratch.")
-    # else:
-    #     # Load checkpoint on CPU map_location
-    #     checkpoint_unet = torch.load(f"{args.existing_ckpt_filepath}", map_location="cpu", weights_only=False)
-    #     # model_dict = unet.state_dict()
-    #     # filtered = {
-    #     #     k: v for k, v in checkpoint_unet["unet_state_dict"].items()
-    #     #     if k in model_dict and v.shape == model_dict[k].shape
-    #     # }
-    #
-    #     unet.load_state_dict(checkpoint_unet["unet_state_dict"], strict=True)
-    #     logger.info(f"Pretrained checkpoint {args.existing_ckpt_filepath} loaded.")
+    epoch = 0
+    loss = np.inf
+    if args.existing_ckpt_filepath is None:
+        logger.info("Training from scratch. Checkpoint Path not provided.")
+    elif os.path.exists(args.existing_ckpt_filepath):
+        checkpoint_unet = torch.load(f"{args.existing_ckpt_filepath}", map_location="cpu", weights_only=False)
+        epoch = checkpoint_unet["epoch"] - 1
+        loss = checkpoint_unet["loss"]
+        unet.load_state_dict(checkpoint_unet["unet_state_dict"], strict=True)
+        logger.info(f"Pretrained checkpoint {args.existing_ckpt_filepath} loaded.")
+    else:
+        logger.info(f"Training from scratch. Checkpoint Path {args.existing_ckpt_filepath} does not exist.")
 
-    return unet
+    return unet, epoch, loss
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
@@ -526,7 +521,7 @@ def diff_model_train(
         assert False, f"ode_solver {args.diffusion_unet_train['ode_solver']} not recognized. Choose from {list(ode_solver_dict.keys())}."
 
     # Load UNet (Move to device logic handled by prepare, but we load first)
-    unet = load_unet(args, accelerator, logger)
+    unet, best_epoch, best_loss = load_unet(args, accelerator, logger)
     include_body_region = False
     include_modality = False
 
@@ -602,9 +597,7 @@ def diff_model_train(
         unet, optimizer, lr_scheduler
     )
     accelerator.wait_for_everyone()
-    best_loss = np.inf
-    best_epoch = 0
-    for epoch in range(args.diffusion_unet_train["n_epochs"]):
+    for epoch in range(best_epoch, args.diffusion_unet_train["n_epochs"]):
         start_time = time.perf_counter()
         loss_torch = train_one_epoch(
             epoch,
