@@ -229,7 +229,7 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
         logger.info("Training from scratch. Checkpoint Path not provided.")
     elif os.path.exists(args.existing_ckpt_filepath):
         checkpoint_unet = torch.load(f"{args.existing_ckpt_filepath}", map_location="cpu", weights_only=False)
-        epoch = checkpoint_unet["epoch"] - 1
+        epoch = checkpoint_unet["epoch"]
         loss = checkpoint_unet["loss"]
         unet.load_state_dict(checkpoint_unet["unet_state_dict"], strict=True)
         logger.info(f"Pretrained checkpoint {args.existing_ckpt_filepath} loaded.")
