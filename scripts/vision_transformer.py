@@ -163,6 +163,9 @@ class LinearAttention(nn.Module):
         torch.nn.init.trunc_normal_(self.qkv.weight, std=0.02)
         if self.qkv.bias is not None:
             nn.init.zeros_(self.qkv.bias)
+        torch.nn.init.trunc_normal_(self.qk_pe_proj.weight, std=0.02)
+        if self.qk_pe_proj.bias is not None:
+            nn.init.zeros_(self.qk_pe_proj.bias)
         torch.nn.init.trunc_normal_(self.proj.weight, std=0.02)
         if self.proj.bias is not None:
             nn.init.zeros_(self.proj.bias)
@@ -195,7 +198,7 @@ class FourierGlobalFilter(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        torch.nn.init.zeros_(self.attn_map.weight)
+        torch.nn.init.trunc_normal_(self.attn_map.weight, std=0.02)
         if self.attn_map.bias is not None:
             nn.init.zeros_(self.attn_map.bias)
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
@@ -302,6 +305,10 @@ class PatchEmbed(nn.Module):
         self.in_chans = in_chans
         self.embed_dim = embed_dim
         self.proj = nn.Conv3d(in_chans, embed_dim, kernel_size=kernel_size, stride=patch_HWD, padding=padding_size)
+        w = self.proj.weight.data
+        nn.init.xavier_uniform_(w.view(w.shape[0], -1))
+        if self.proj.bias is not None:
+            nn.init.zeros_(self.proj.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.proj(x)
