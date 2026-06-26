@@ -626,7 +626,7 @@ def diff_model_train(
             logger.info(
                 f"epoch {epoch + 1} average loss: {loss_torch_epoch:.4f}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s")
         accelerator.free_memory()
-        if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1 or epoch == 0:
+        if (epoch + 1) % 10 == 0 or epoch == args.diffusion_unet_train["n_epochs"] - 1 or epoch == best_epoch:
             start_time = time.perf_counter()
             eval_loss_torch = evaluate(
                 unet,
