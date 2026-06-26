@@ -91,9 +91,12 @@ class Net(nn.Module):
         self.vit = VisionTransformer(patch_size=(2, 2, 2),
                                      in_chans=4,
                                      out_chans=4,
-                                     embed_dim=512,
+                                     embed_dim=1024,
                                      temb_channels=self.cond_emb_dim,
-                                     num_heads=16)
+                                     num_heads=16,
+                                     depth=28,
+                                     ffn_ratio=4,
+                                     legendre_max_degree=21)
 
 
     def _create_embedding_module(self, input_dim, embed_dim):

@@ -662,7 +662,7 @@ def diff_model_train(
                 save_checkpoint(
                     epoch,
                     unet,
-                    loss_torch_epoch,
+                    eval_loss_torch[-2],
                     args.model_dir,
                     args,
                     accelerator

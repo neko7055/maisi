@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union, C
 import torch
 from torch import nn, Tensor
 import torch.nn.functional as F
+import torch.utils.checkpoint as cp
 
 dtype_dict = {
     "fp32": torch.float32,
@@ -413,7 +414,7 @@ class VisionTransformer(nn.Module):
         B, C, H, W, D = x.shape
         pe = self._get_pe(H, W, D, x.device)
         for _, blk in enumerate(self.blocks):
-            x = blk(x, emb, pe=pe)
+            x = cp.checkpoint(blk,x, emb, pe, use_reentrant=False)
         x = self.final_layer(x, emb)
         x = x.reshape(shape=(B, self.out_channels,
                              self.final_layer.patch_size[0],
