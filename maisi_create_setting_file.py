@@ -60,7 +60,7 @@ model_config_out["transform_to_laten"]["modality"] = "ct_non_contrast_to_contras
 model_config_out["transform_to_laten"]["num_workers"] = 2
 
 model_config_out["diffusion_unet_train"] = OrderedDict()
-model_config_out["diffusion_unet_train"]["batch_size"] = 1
+model_config_out["diffusion_unet_train"]["batch_size"] = 8
 model_config_out["diffusion_unet_train"]["time_batch_size"]=1
 model_config_out["diffusion_unet_train"]["gradient_accumulation_steps"] = 1
 model_config_out["diffusion_unet_train"]["num_workers"] = 4
