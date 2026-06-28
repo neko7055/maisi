@@ -138,6 +138,70 @@ def linear_attn(Q: torch.Tensor,
     out = numerator / Z.unsqueeze(2)
     return out
 
+def linear_attn_enhence(Q: torch.Tensor,
+                        K: torch.Tensor,
+                        V: torch.Tensor,
+                        eps: float = 1e-5):
+    # Q, K, V 輸入大小皆為: (B, heads, head_dim, H, W, D)
+    H, W, D = Q.shape[-3:]
+    N = H * W * D
+    # Step 1: phi() kernel，確保數值非負
+    Q_phi = F.elu(Q) + 1.0
+    K_phi = F.elu(K) + 1.0
+
+    # === 分子計算最佳化 ===
+    # 將 Q_phi @ T 的計算展開成 8 項獨立的張量乘法
+    # 先計算 K 與 V 在空間上的 Sum 降維，再乘上 Q，完全避免產生 head_dim * head_dim 的超大空間張量
+
+    # 0. 無額外加總項 (Identity)
+    # 數學等價於 Q_phi @ (K_phi * V)
+    QK = (Q_phi * K_phi).sum(dim=2, keepdim=True)
+    N0 = QK * V / N
+
+    # 1. 僅對 X (dim=-3) 進行加總
+    KV_x = torch.einsum("b h d x y z, b h v x y z -> b h d v y z", K_phi, V) / N
+    N_x = torch.einsum("b h d x y z, b h d v y z -> b h v x y z", Q_phi, KV_x)
+
+    # 2. 僅對 Y (dim=-2) 進行加總
+    KV_y = torch.einsum("b h d x y z, b h v x y z -> b h d v x z", K_phi, V) / N
+    N_y = torch.einsum("b h d x y z, b h d v x z -> b h v x y z", Q_phi, KV_y)
+
+    # 3. 僅對 Z (dim=-1) 進行加總
+    KV_z = torch.einsum("b h d x y z, b h v x y z -> b h d v x y", K_phi, V) / N
+    N_z = torch.einsum("b h d x y z, b h d v x y -> b h v x y z", Q_phi, KV_z)
+
+    # 4. 對 X, Y 進行加總
+    KV_xy = torch.einsum("b h d x y z, b h v x y z -> b h d v z", K_phi, V) / N
+    N_xy = torch.einsum("b h d x y z, b h d v z -> b h v x y z", Q_phi, KV_xy)
+
+    # 5. 對 X, Z 進行加總
+    KV_xz = torch.einsum("b h d x y z, b h v x y z -> b h d v y", K_phi, V) / N
+    N_xz = torch.einsum("b h d x y z, b h d v y -> b h v x y z", Q_phi, KV_xz)
+
+    # 6. 對 Y, Z 進行加總
+    KV_yz = torch.einsum("b h d x y z, b h v x y z -> b h d v x", K_phi, V) / N
+    N_yz = torch.einsum("b h d x y z, b h d v x -> b h v x y z", Q_phi, KV_yz)
+
+    # 7. 對 X, Y, Z 皆進行加總
+    KV_xyz = torch.einsum("b h d x y z, b h v x y z -> b h d v", K_phi, V) / N
+    N_xyz = torch.einsum("b h d x y z, b h d v -> b h v x y z", Q_phi, KV_xyz)
+
+    # 加總 8 種空間維度組合
+    numerator = N0 + N_x + N_y + N_z + N_xy + N_xz + N_yz + N_xyz
+
+    # === 分母計算 ===
+    # 分母的 K_sum 維度只有 (B, heads, head_dim, H, W, D)，沒有膨脹問題，保留原本的高效寫法
+    K_sum = K_phi / N
+    K_sum = K_sum + K_sum.sum(dim=-3, keepdim=True)
+    K_sum = K_sum + K_sum.sum(dim=-2, keepdim=True)
+    K_sum = K_sum + K_sum.sum(dim=-1, keepdim=True)
+    Z = torch.einsum("b h d x y z, b h d x y z -> b h x y z", Q_phi, K_sum)
+    Z = Z + eps
+
+    # Z.unsqueeze(2) 將形狀變為 (B, heads, 1, H, W, D) 以便 broadcast 給分子
+    out = numerator / Z.unsqueeze(2)
+    return out
+
 class LinearAttention(nn.Module):
     def __init__(
         self,
@@ -180,7 +244,7 @@ class LinearAttention(nn.Module):
         k_pe = k_pe.view(1, self.num_heads, self.head_dim, H, W, D)
         q = q + q_pe
         k = k + k_pe
-        attn_out = linear_attn(q, k, v)
+        attn_out = linear_attn_enhence(q, k, v)
         attn_out = attn_out.view(B, C, H, W, D) + self.fft_dw(v.view(B, C, H, W, D), pe)
         attn_out = self.proj(attn_out)
         return attn_out
@@ -198,7 +262,7 @@ class FourierGlobalFilter(nn.Module):
         self._init_weights()
 
     def _init_weights(self):
-        torch.nn.init.trunc_normal_(self.attn_map.weight, std=0.02)
+        torch.nn.init.zeros_(self.attn_map.weight)
         if self.attn_map.bias is not None:
             nn.init.zeros_(self.attn_map.bias)
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
