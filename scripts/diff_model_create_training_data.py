@@ -99,7 +99,27 @@ def create_data_transforms(data_type,
         except Exception as e:
             return np.eye(4).astype(np.float64)
 
-    def _nifti_as_tensor(img)-> torch.Tensor:
+    class ApplyCommonMaskd(monai.transforms.Transform):
+        def __init__(self, keys, threshold=-1000, fill_value=-1000):
+            self.keys = keys
+            self.threshold = threshold
+            self.fill_value = fill_value
+
+        def __call__(self, data):
+            d = dict(data)
+
+            # 所有 key 共用的 mask
+            mask = np.logical_and.reduce(
+                [d[key] > self.threshold for key in self.keys]
+            )
+
+            # 套用到所有 key
+            for key in self.keys:
+                d[key] = np.where(mask, d[key], self.fill_value)
+
+            return d
+
+    def _nifti_as_np(img) -> torch.Tensor:
         data = img.get_fdata(caching='unchanged', dtype=np.float32)
         if data.ndim == 3:
             # (X, Y, Z) → (1, X, Y, Z)
@@ -108,7 +128,10 @@ def create_data_transforms(data_type,
             # (X, Y, Z, C) → (C, X, Y, Z)
             data = data.transpose(3, 0, 1, 2)
 
-        return torch.from_numpy(data.copy())
+        return data.copy()
+
+    def _nifti_as_tensor(img) -> torch.Tensor:
+        return torch.from_numpy(img.copy())
 
     base_transforms = [
         monai.transforms.Lambdad(
@@ -135,6 +158,13 @@ def create_data_transforms(data_type,
             track_meta=False,
             overwrite=["src_affine", "tar_affine"],
         ),
+        monai.transforms.Lambdad(
+            keys=keys,
+            func=_nifti_as_np,
+            track_meta=False,
+            overwrite=True,
+        ),
+        ApplyCommonMaskd(keys=keys, threshold=-1000, fill_value=-1000),
         monai.transforms.Lambdad(
             keys=keys,
             func=_nifti_as_tensor,
