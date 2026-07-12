@@ -270,6 +270,8 @@ class FourierGlobalFilter(nn.Module):
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
         B, C, H, W, D = x.shape
         weight = self.attn_map(pe)
+        x = x.float()
+        weight = weight.float()
         weight = torch.fft.rfftn(weight, dim=(-3, -2, -1), norm="ortho")
         x = torch.fft.rfftn(x, dim=(-3, -2, -1), norm="ortho")
         x = x * weight
