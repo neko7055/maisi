@@ -246,7 +246,7 @@ class LinearAttention(nn.Module):
         q = q.view(B, self.num_heads, self.head_dim, H, W, D)
         k = k.view(B, self.num_heads, self.head_dim, H, W, D)
         v = v.view(B, self.num_heads, self.head_dim, H, W, D)
-        attn_out = linear_attn_enhence(q, k, v)
+        attn_out = linear_attn_enhance(q, k, v)
         attn_out = attn_out.view(B, C, H, W, D) + self.fft_dw(v.view(B, C, H, W, D), pe)
         attn_out = self.proj(attn_out)
         return attn_out
