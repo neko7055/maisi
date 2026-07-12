@@ -175,8 +175,8 @@ def prepare_data(
     if for_training:
         affine_kwargs = {
             "keys": ["src_image", "tar_image"],
-            "prob": 0.5,  # 這裡設 1.0，改由 OneOf 控制總機率
-            "translate_range": (16, 16, 16),  # 百分比平移可以搭配前述技巧
+            "prob": 1.0,  # 這裡設 1.0，改由 OneOf 控制總機率
+            "translate_range": (24, 24, 0),  # 百分比平移可以搭配前述技巧
             "mode": (1, 1),
         }
         augment = monai.transforms.OneOf(

@@ -13,6 +13,8 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 
+from .dwt import WTConv, WPConv
+
 dtype_dict = {
     "fp32": torch.float32,
     "fp16": torch.float16,
@@ -123,6 +125,7 @@ class Mlp(nn.Module):
         x = self.fc2(x)
         return x
 
+@torch.compile(mode="default", fullgraph=True)
 def linear_attn(Q: torch.Tensor,
                 K: torch.Tensor,
                 V: torch.Tensor,
@@ -138,7 +141,8 @@ def linear_attn(Q: torch.Tensor,
     out = numerator / Z.unsqueeze(2)
     return out
 
-def linear_attn_enhence(Q: torch.Tensor,
+@torch.compile(mode="default", fullgraph=True)
+def linear_attn_enhance(Q: torch.Tensor,
                         K: torch.Tensor,
                         V: torch.Tensor,
                         eps: float = 1e-5):
@@ -195,6 +199,7 @@ def linear_attn_enhence(Q: torch.Tensor,
     K_sum = K_sum + K_sum.sum(dim=-3, keepdim=True)
     K_sum = K_sum + K_sum.sum(dim=-2, keepdim=True)
     K_sum = K_sum + K_sum.sum(dim=-1, keepdim=True)
+
     Z = torch.einsum("b h d x y z, b h d x y z -> b h x y z", Q_phi, K_sum)
     Z = Z + eps
 
@@ -217,7 +222,7 @@ class LinearAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.pe_dim = pe_dim
-        self.qk_pe_proj = nn.Conv3d(self.pe_dim, 2 * dim, kernel_size=1, stride=1, padding=0, bias=False, device=device)
+        self.conv = WPConv(dim, 3)
         self.qkv = nn.Conv3d(dim, 3 * dim, kernel_size=1,padding=0, bias=qkv_bias, device=device)
         self.fft_dw = FourierGlobalFilter(dim, pe_dim)
         self.proj = nn.Conv3d(dim, dim, kernel_size=1, bias=proj_bias, device=device)
@@ -227,9 +232,6 @@ class LinearAttention(nn.Module):
         torch.nn.init.trunc_normal_(self.qkv.weight, std=0.02)
         if self.qkv.bias is not None:
             nn.init.zeros_(self.qkv.bias)
-        torch.nn.init.trunc_normal_(self.qk_pe_proj.weight, std=0.02)
-        if self.qk_pe_proj.bias is not None:
-            nn.init.zeros_(self.qk_pe_proj.bias)
         torch.nn.init.trunc_normal_(self.proj.weight, std=0.02)
         if self.proj.bias is not None:
             nn.init.zeros_(self.proj.bias)
@@ -237,13 +239,13 @@ class LinearAttention(nn.Module):
     def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
         B, C, H, W, D = x.shape
         qkv = self.qkv(x)
-        qkv = qkv.view(B, 3, self.num_heads, self.head_dim, H, W, D)
+        qkv = qkv.view(B, 3, C, H, W, D)
         q, k, v = torch.unbind(qkv, 1)
-        q_pe, k_pe = self.qk_pe_proj(pe).chunk(2, dim=1)
-        q_pe = q_pe.view(1, self.num_heads, self.head_dim, H, W, D)
-        k_pe = k_pe.view(1, self.num_heads, self.head_dim, H, W, D)
-        q = q + q_pe
-        k = k + k_pe
+        q = q + self.conv(q)
+        k = k + self.conv(k)
+        q = q.view(B, self.num_heads, self.head_dim, H, W, D)
+        k = k.view(B, self.num_heads, self.head_dim, H, W, D)
+        v = v.view(B, self.num_heads, self.head_dim, H, W, D)
         attn_out = linear_attn_enhence(q, k, v)
         attn_out = attn_out.view(B, C, H, W, D) + self.fft_dw(v.view(B, C, H, W, D), pe)
         attn_out = self.proj(attn_out)
