@@ -46,6 +46,19 @@ ode_solver_dict = {"euler":    euler_step,
                    "rk4":      rk4_step,
                    "rk5":      rk5_step,}
 
+class MultiScaleLoss(torch.nn.Module):
+    def __init__(self, basic_loss: Callable[..., torch.nn.Module], weight: List[float]):
+        super().__init__()
+        self.basic_loss = basic_loss()
+        self.weight = weight
+    def forward(self, y_pred: torch.Tensor, y_gt: torch.Tensor) -> torch.Tensor:
+        loss = self.weight[0] * self.basic_loss(y_pred, y_gt)
+        for w in self.weight[1:]:
+            y_pred = torch.nn.functional.avg_pool3d(y_pred, kernel_size=2, stride=2)
+            y_gt = torch.nn.functional.avg_pool3d(y_gt, kernel_size=2, stride=2)
+            loss += w * self.basic_loss(y_pred, y_gt)
+        return loss
+
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
     mask_ct = torch.logical_and((modality_tensor < 8), (modality_tensor >= 2))
@@ -502,6 +515,10 @@ def diff_model_train(
                                                               args.diffusion_unet_train["time_batch_size"],
                               step_scheduler_with_optimizer=False)
 
+    cache_dir = os.path.join(os.path.expanduser("~"), ".triton", f"triton_{accelerator.process_index}")
+    os.makedirs(cache_dir, exist_ok=True)
+    os.environ["TRITON_CACHE_DIR"] = cache_dir
+
     logger = setup_logging("training", rk_filter=True)
 
     # Log device info
@@ -587,7 +604,7 @@ def diff_model_train(
     # Calculate steps based on local dataset size (approximate)
     total_steps = args.diffusion_unet_train["n_epochs"] * 20
     lr_scheduler = create_lr_scheduler(optimizer, total_steps)
-    loss_pt = torch.nn.L1Loss().to(accelerator.device)
+    loss_pt = MultiScaleLoss(torch.nn.L1Loss, [0.4, 0.3, 0.2, 0.1]).to(accelerator.device)
 
     # Prepare everything with Accelerate
     # NOTE: We do NOT pass train_loader here because we manually partitioned the dataset

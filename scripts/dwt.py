@@ -15,12 +15,11 @@ def get_cdf97_constants_tensor(dtype, device):
     if key in _CONSTANTS_CACHE:
         return _CONSTANTS_CACHE[key]
 
-    # 在 Python 原生 64-bit 空間進行極限精確度計算
     alpha = -1.586134342059924
     beta = -0.052980118572961
     gamma = 0.882911075530934
     delta = 0.443506852043971
-    K = 1.1496043988602418  # 補足最後一位 8 (嚴格對齊 PyWavelets)
+    K = 1.1496043988602418
     inv_K = 1.0 / K
 
     C1 = alpha * beta * gamma
@@ -34,7 +33,6 @@ def get_cdf97_constants_tensor(dtype, device):
     D4 = delta * C3
     D5 = beta + delta * (1.0 + 3.0 * C3)
 
-    # 嚴格使用 torch.float64 打包，最後再根據使用者的 Tensor dtype (float32/64) 自動轉換
     tensor = torch.tensor([
         C1, C2, C3, C3_mid, D1, D2, D3, D4, D5, K, inv_K
     ], dtype=torch.float64, device=device).to(dtype)
@@ -44,9 +42,59 @@ def get_cdf97_constants_tensor(dtype, device):
 
 
 # ==============================================================================
-# 1. 輔助函數與 Triton Kernels (指標載入常數版)
+# 1. Triton Autotune 參數配置 (加入 1024 與 512 侵略性配置)
+# ==============================================================================
+def get_dwt_autotune_configs():
+    return [
+        # ==============================================================================
+        # [Tier 1] 半精度 (BF16/FP16) 與資料中心卡專武區
+        # FP32 在多數消費級顯卡上跑這區可能會 OOM，但 Autotuner 會自動忽略並往下找。
+        # 這是為了確保在 BF16 下能榨乾所有 Shared Memory。
+        # ==============================================================================
+        triton.Config({'BLOCK_B': 1024}, num_warps=8, num_stages=2),
+        triton.Config({'BLOCK_B': 512}, num_warps=8, num_stages=3),
+        triton.Config({'BLOCK_B': 512}, num_warps=4, num_stages=2), # FP32 在高階卡的極限
+
+        # ==============================================================================
+        # [Tier 2] FP32 甜蜜點 & BF16 深層管線區 (最常被選中)
+        # 256 是泛用性最高的 Block Size。
+        # num_stages=4 對 BF16 是神級配置，能完美掩蓋記憶體讀取延遲。
+        # ==============================================================================
+        triton.Config({'BLOCK_B': 256}, num_warps=8, num_stages=4),
+        triton.Config({'BLOCK_B': 256}, num_warps=8, num_stages=3), # FP32 最佳平衡點
+        triton.Config({'BLOCK_B': 256}, num_warps=4, num_stages=3),
+
+        # ==============================================================================
+        # [Tier 3] 極限延遲掩蓋區 (針對 dim=4 記憶體不連續問題)
+        # 在 3D DWT 處理 W 維度時，記憶體 stride 跳躍極大。
+        # 縮小 BLOCK_B 到 128，並將 num_stages 撐到 5 或 6，強迫硬體提早預載資料。
+        # ==============================================================================
+        triton.Config({'BLOCK_B': 128}, num_warps=8, num_stages=5),
+        triton.Config({'BLOCK_B': 128}, num_warps=4, num_stages=5),
+        triton.Config({'BLOCK_B': 128}, num_warps=4, num_stages=4),
+
+        # ==============================================================================
+        # [Tier 4] 高佔有率 (Occupancy) 保底區
+        # 當 B_TOTAL 總量不夠填滿 GPU 所有的 SM 核心時 (例如 B=1, C=16)。
+        # 切碎 BLOCK_B 可以生出更多 Thread Blocks，讓所有核心都有事做。
+        # ==============================================================================
+        triton.Config({'BLOCK_B': 64}, num_warps=4, num_stages=4),
+        triton.Config({'BLOCK_B': 64}, num_warps=2, num_stages=4),
+        triton.Config({'BLOCK_B': 32}, num_warps=4, num_stages=3),
+        triton.Config({'BLOCK_B': 32}, num_warps=2, num_stages=3),
+
+        # ==============================================================================
+        # [Tier 5] 防爆保底
+        # ==============================================================================
+        triton.Config({'BLOCK_B': 16}, num_warps=2, num_stages=2),
+    ]
+
+
+# ==============================================================================
+# 2. Triton Kernels
 # ==============================================================================
 
+@triton.autotune(configs=get_dwt_autotune_configs(), key=['B_TOTAL', 'N_HALF'])
 @triton.jit
 def cdf97_dwt_fwd_kernel(
         x_ptr, l_ptr, h_ptr, const_ptr,
@@ -54,7 +102,8 @@ def cdf97_dwt_fwd_kernel(
         stride_x_o, stride_x_n, stride_x_i,
         stride_l_o, stride_l_n, stride_l_i,
         stride_h_o, stride_h_n, stride_h_i,
-        BLOCK_B: tl.constexpr, BLOCK_N: tl.constexpr
+        BLOCK_N: tl.constexpr,
+        BLOCK_B: tl.constexpr
 ):
     pid = tl.program_id(0)
     idx_b = pid * BLOCK_B + tl.arange(0, BLOCK_B)
@@ -88,7 +137,6 @@ def cdf97_dwt_fwd_kernel(
     o_0 = tl.load(x_base[:, None] + (2 * idx_0[None, :] + 1) * stride_x_n, mask=mask_2d)
     o_p1 = tl.load(x_base[:, None] + (2 * idx_p1[None, :] + 1) * stride_x_n, mask=mask_2d)
 
-    # 從 HBM 中直接載入純淨的常數 (Triton 會自動廣播為純量)
     C1 = tl.load(const_ptr + 0)
     C2 = tl.load(const_ptr + 1)
     C3 = tl.load(const_ptr + 2)
@@ -108,6 +156,7 @@ def cdf97_dwt_fwd_kernel(
     tl.store(h_base[:, None] + idx_n[None, :] * stride_h_n, H * inv_K, mask=mask_2d)
 
 
+@triton.autotune(configs=get_dwt_autotune_configs(), key=['B_TOTAL', 'N_HALF'])
 @triton.jit
 def cdf97_dwt_bwd_kernel(
         dl_ptr, dh_ptr, dx_ptr, const_ptr,
@@ -115,7 +164,7 @@ def cdf97_dwt_bwd_kernel(
         stride_l_o, stride_l_n, stride_l_i,
         stride_h_o, stride_h_n, stride_h_i,
         stride_x_o, stride_x_n, stride_x_i,
-        BLOCK_B: tl.constexpr, BLOCK_N: tl.constexpr
+        BLOCK_N: tl.constexpr, BLOCK_B: tl.constexpr
 ):
     pid = tl.program_id(0)
     idx_b = pid * BLOCK_B + tl.arange(0, BLOCK_B)
@@ -168,6 +217,7 @@ def cdf97_dwt_bwd_kernel(
     tl.store(x_base[:, None] + (2 * idx_n[None, :] + 1) * stride_x_n, dx_odd, mask=mask_2d)
 
 
+@triton.autotune(configs=get_dwt_autotune_configs(), key=['B_TOTAL', 'N_HALF'])
 @triton.jit
 def cdf97_idwt_fwd_kernel(
         l_ptr, h_ptr, x_ptr, const_ptr,
@@ -175,7 +225,7 @@ def cdf97_idwt_fwd_kernel(
         stride_l_o, stride_l_n, stride_l_i,
         stride_h_o, stride_h_n, stride_h_i,
         stride_x_o, stride_x_n, stride_x_i,
-        BLOCK_B: tl.constexpr, BLOCK_N: tl.constexpr
+        BLOCK_N: tl.constexpr, BLOCK_B: tl.constexpr
 ):
     pid = tl.program_id(0)
     idx_b = pid * BLOCK_B + tl.arange(0, BLOCK_B)
@@ -228,6 +278,7 @@ def cdf97_idwt_fwd_kernel(
     tl.store(x_base[:, None] + (2 * idx_n[None, :] + 1) * stride_x_n, x_odd, mask=mask_2d)
 
 
+@triton.autotune(configs=get_dwt_autotune_configs(), key=['B_TOTAL', 'N_HALF'])
 @triton.jit
 def cdf97_idwt_bwd_kernel(
         dx_ptr, dl_ptr, dh_ptr, const_ptr,
@@ -235,7 +286,7 @@ def cdf97_idwt_bwd_kernel(
         stride_x_o, stride_x_n, stride_x_i,
         stride_l_o, stride_l_n, stride_l_i,
         stride_h_o, stride_h_n, stride_h_i,
-        BLOCK_B: tl.constexpr, BLOCK_N: tl.constexpr
+        BLOCK_N: tl.constexpr, BLOCK_B: tl.constexpr
 ):
     pid = tl.program_id(0)
     idx_b = pid * BLOCK_B + tl.arange(0, BLOCK_B)
@@ -289,7 +340,7 @@ def cdf97_idwt_bwd_kernel(
 
 
 # ==============================================================================
-# 2. PyTorch autograd.Function 包裝器
+# 3. PyTorch autograd.Function 包裝器
 # ==============================================================================
 
 class TritonCDF97DWTFunction(torch.autograd.Function):
@@ -319,10 +370,10 @@ class TritonCDF97DWTFunction(torch.autograd.Function):
         H_3d = H.view(B_outer, N_HALF, B_inner)
 
         BLOCK_N = triton.next_power_of_2(N_HALF)
-        BLOCK_B = min(64, max(1, 256 // BLOCK_N))
-        grid = (triton.cdiv(B_TOTAL, BLOCK_B),)
 
-        # 取得常數 Tensor 指標
+        # Grid 與動態 BLOCK_B 連動
+        grid = lambda meta: (triton.cdiv(B_TOTAL, meta['BLOCK_B']),)
+
         constants = get_cdf97_constants_tensor(x.dtype, x.device)
 
         cdf97_dwt_fwd_kernel[grid](
@@ -331,7 +382,7 @@ class TritonCDF97DWTFunction(torch.autograd.Function):
             x_3d.stride(0), x_3d.stride(1), x_3d.stride(2),
             L_3d.stride(0), L_3d.stride(1), L_3d.stride(2),
             H_3d.stride(0), H_3d.stride(1), H_3d.stride(2),
-            BLOCK_B, BLOCK_N
+            BLOCK_N=BLOCK_N
         )
         return L, H
 
@@ -357,8 +408,7 @@ class TritonCDF97DWTFunction(torch.autograd.Function):
         grad_x_3d = grad_x.view(B_outer, N, B_inner)
 
         BLOCK_N = triton.next_power_of_2(N_HALF)
-        BLOCK_B = min(64, max(1, 256 // BLOCK_N))
-        grid = (triton.cdiv(B_TOTAL, BLOCK_B),)
+        grid = lambda meta: (triton.cdiv(B_TOTAL, meta['BLOCK_B']),)
 
         constants = get_cdf97_constants_tensor(grad_L.dtype, grad_L.device)
 
@@ -368,7 +418,7 @@ class TritonCDF97DWTFunction(torch.autograd.Function):
             grad_L_3d.stride(0), grad_L_3d.stride(1), grad_L_3d.stride(2),
             grad_H_3d.stride(0), grad_H_3d.stride(1), grad_H_3d.stride(2),
             grad_x_3d.stride(0), grad_x_3d.stride(1), grad_x_3d.stride(2),
-            BLOCK_B, BLOCK_N
+            BLOCK_N=BLOCK_N
         )
         return grad_x, None
 
@@ -399,8 +449,7 @@ class TritonCDF97IDWTFunction(torch.autograd.Function):
         x_3d = x.view(B_outer, N, B_inner)
 
         BLOCK_N = triton.next_power_of_2(N_HALF)
-        BLOCK_B = min(64, max(1, 256 // BLOCK_N))
-        grid = (triton.cdiv(B_TOTAL, BLOCK_B),)
+        grid = lambda meta: (triton.cdiv(B_TOTAL, meta['BLOCK_B']),)
 
         constants = get_cdf97_constants_tensor(L.dtype, L.device)
 
@@ -410,7 +459,7 @@ class TritonCDF97IDWTFunction(torch.autograd.Function):
             L_3d.stride(0), L_3d.stride(1), L_3d.stride(2),
             H_3d.stride(0), H_3d.stride(1), H_3d.stride(2),
             x_3d.stride(0), x_3d.stride(1), x_3d.stride(2),
-            BLOCK_B, BLOCK_N
+            BLOCK_N=BLOCK_N
         )
         return x
 
@@ -436,8 +485,7 @@ class TritonCDF97IDWTFunction(torch.autograd.Function):
         grad_H_3d = grad_H.view(B_outer, N_HALF, B_inner)
 
         BLOCK_N = triton.next_power_of_2(N_HALF)
-        BLOCK_B = min(64, max(1, 256 // BLOCK_N))
-        grid = (triton.cdiv(B_TOTAL, BLOCK_B),)
+        grid = lambda meta: (triton.cdiv(B_TOTAL, meta['BLOCK_B']),)
 
         constants = get_cdf97_constants_tensor(grad_x.dtype, grad_x.device)
 
@@ -447,13 +495,13 @@ class TritonCDF97IDWTFunction(torch.autograd.Function):
             grad_x_3d.stride(0), grad_x_3d.stride(1), grad_x_3d.stride(2),
             grad_L_3d.stride(0), grad_L_3d.stride(1), grad_L_3d.stride(2),
             grad_H_3d.stride(0), grad_H_3d.stride(1), grad_H_3d.stride(2),
-            BLOCK_B, BLOCK_N
+            BLOCK_N=BLOCK_N
         )
         return grad_L, grad_H, None
 
 
 # ==============================================================================
-# 3. 隨插即用的 PyTorch Modules
+# 4. 隨插即用的 PyTorch Modules
 # ==============================================================================
 
 class CDF97DWT3D(nn.Module):
@@ -496,81 +544,9 @@ class CDF97IDWT3D(nn.Module):
         x = TritonCDF97IDWTFunction.apply(L_d, H_d, 2)
         return x
 
-class WTConv(nn.Module):
-    def __init__(
-            self,
-            dim: int,
-            wavelet_levels=2,
-    ) -> None:
-        super().__init__()
-        self.dwt = CDF97DWT3D()
-        self.idwt = CDF97IDWT3D()
-        self.levels = wavelet_levels
-        self.dim = dim
-        self.base_conv = nn.Conv3d(dim, dim, groups=dim, kernel_size=3,stride=1,padding=1, bias=False)
-        self.convs = nn.ModuleList([nn.Conv3d(dim, dim, groups=dim,
-                                              kernel_size=3,stride=1,padding=1, bias=False) for _ in range(8 * self.levels)])
-        self.apply(self._init_weights)
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv3d):
-            torch.nn.init.zeros_(m.weight)
-            if m.bias is not None:
-                nn.init.zeros_(m.bias)
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        bands_list = []
-        bs_conv = self.base_conv(x)
-        bands=[x]
-        for i in range(self.levels):
-            bands = self.dwt(bands[0])
-            bands_list.append(bands)
-        x = 0.0
-        for i,bands in enumerate(reversed(bands_list)):
-            LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH = bands
-            LLL = x + self.convs[i*8 + 0](LLL)
-            LLH = self.convs[i*8 + 1](LLH)
-            LHL = self.convs[i*8 + 2](LHL)
-            LHH = self.convs[i*8 + 3](LHH)
-            HLL = self.convs[i*8 + 4](HLL)
-            HLH = self.convs[i*8 + 5](HLH)
-            HHL = self.convs[i*8 + 6](HHL)
-            HHH = self.convs[i*8 + 7](HHH)
-            x = self.idwt((LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH))
-        return bs_conv + x
-
-class WPConv(nn.Module):
-    def __init__(
-            self,
-            dim: int,
-            wavelet_levels=2,
-    ) -> None:
-        super().__init__()
-        self.dwt = CDF97DWT3D()
-        self.idwt = CDF97IDWT3D()
-        self.levels = wavelet_levels
-        self.dim = dim
-        self.dws = nn.ModuleList([nn.Conv3d(dim * (8 ** i), dim * (8 ** i), groups=dim * (8 ** i),
-                           kernel_size=3,stride=1,padding=1, bias=False) for i in range(1,self.levels+1)])
-        self.dw = nn.Conv3d(dim, dim, groups=dim,
-                           kernel_size=3,stride=1,padding=1, bias=False)
-        self.apply(self._init_weights)
-    def _init_weights(self, m):
-        if isinstance(m, nn.Conv3d):
-            torch.nn.init.zeros_(m.weight)
-            if m.bias is not None:
-                torch.nn.init.zeros_(m.bias)
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        y = [self.dw(x)]
-        for i in range(self.levels):
-            x = torch.cat(self.dwt(x),dim=1)
-            y.append(self.dws[i](x))
-        x = y.pop()
-        for _ in range(self.levels):
-            x = self.idwt(torch.chunk(x,8,dim=1)) + y.pop()
-        return x
-
 if __name__ == "__main__":
     device = torch.accelerator.current_accelerator()
-    x = torch.randn(1, 4, 16, 16, 16, dtype=torch.float64, device=device)
+    x = torch.randn(1, 4, 32, 32, 32, dtype=torch.float64, device=device)
 
     dwt = CDF97DWT3D()#.to(torch.float32)
     idwt = CDF97IDWT3D()#.to(torch.float32)

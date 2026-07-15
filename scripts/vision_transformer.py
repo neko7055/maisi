@@ -13,7 +13,7 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 import torch.utils.checkpoint as cp
 
-from .dwt import WTConv, WPConv
+from .dwt import CDF97DWT3D, CDF97IDWT3D
 
 dtype_dict = {
     "fp32": torch.float32,
@@ -95,6 +95,78 @@ def layer_norm(x, eps=1e-6):
 def modulate(x, shift, scale):
     return x * (1 + scale[...,None,None,None]) + shift[...,None,None,None]
 
+class WTConv(nn.Module):
+    def __init__(
+            self,
+            dim: int,
+            wavelet_levels=2,
+    ) -> None:
+        super().__init__()
+        self.dwt = CDF97DWT3D()
+        self.idwt = CDF97IDWT3D()
+        self.levels = wavelet_levels
+        self.dim = dim
+        self.base_conv = nn.Conv3d(dim, dim, groups=dim, kernel_size=3,stride=1,padding=1, bias=False)
+        self.convs = nn.ModuleList([nn.Conv3d(dim, dim, groups=dim,
+                                              kernel_size=3,stride=1,padding=1, bias=False) for _ in range(8 * self.levels)])
+        self.apply(self._init_weights)
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv3d):
+            torch.nn.init.zeros_(m.weight)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        bands_list = []
+        bs_conv = self.base_conv(x)
+        bands=[x]
+        for i in range(self.levels):
+            bands = self.dwt(bands[0])
+            bands_list.append(bands)
+        x = 0.0
+        for i,bands in enumerate(reversed(bands_list)):
+            LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH = bands
+            LLL = x + self.convs[i*8 + 0](LLL)
+            LLH = self.convs[i*8 + 1](LLH)
+            LHL = self.convs[i*8 + 2](LHL)
+            LHH = self.convs[i*8 + 3](LHH)
+            HLL = self.convs[i*8 + 4](HLL)
+            HLH = self.convs[i*8 + 5](HLH)
+            HHL = self.convs[i*8 + 6](HHL)
+            HHH = self.convs[i*8 + 7](HHH)
+            x = self.idwt((LLL, LLH, LHL, LHH, HLL, HLH, HHL, HHH))
+        return bs_conv + x
+
+class WPConv(nn.Module):
+    def __init__(
+            self,
+            dim: int,
+            wavelet_levels=2,
+    ) -> None:
+        super().__init__()
+        self.dwt = CDF97DWT3D()
+        self.idwt = CDF97IDWT3D()
+        self.levels = wavelet_levels
+        self.dim = dim
+        self.dws = nn.ModuleList([nn.Conv3d(dim * (8 ** i), dim * (8 ** i), groups=dim * (8 ** i),
+                           kernel_size=3,stride=1,padding=1, bias=False) for i in range(1,self.levels+1)])
+        self.dw = nn.Conv3d(dim, dim, groups=dim,
+                           kernel_size=3,stride=1,padding=1, bias=False)
+        self.apply(self._init_weights)
+    def _init_weights(self, m):
+        if isinstance(m, nn.Conv3d):
+            torch.nn.init.zeros_(m.weight)
+            if m.bias is not None:
+                torch.nn.init.zeros_(m.bias)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        y = [self.dw(x)]
+        for i in range(self.levels):
+            x = torch.cat(self.dwt(x),dim=1)
+            y.append(self.dws[i](x))
+        x = y.pop()
+        for _ in range(self.levels):
+            x = self.idwt(torch.chunk(x,8,dim=1)) + y.pop()
+        return x
+
 class Mlp(nn.Module):
     def __init__(
         self,
@@ -130,12 +202,15 @@ def linear_attn(Q: torch.Tensor,
                 K: torch.Tensor,
                 V: torch.Tensor,
                 eps: float = 1e-5):
+    # Q, K, V 輸入大小皆為: (B, heads, head_dim, H, W, D)
+    H, W, D = Q.shape[-3:]
+    N = H * W * D
     # Step 1: phi() kernel，讓數值非負
     Q_phi = F.elu(Q) + 1.0  # (B, heads, head_dim,  H, W, D)
     K_phi = F.elu(K) + 1.0  # (B, heads, head_dim,  H, W, D)
-    KV = torch.einsum("b h d x y z, b h v x y z -> b h d v", K_phi, V)
+    KV = torch.einsum("b h d x y z, b h v x y z -> b h d v", K_phi, V) / N
     numerator = torch.einsum("b h d x y z, b h d v -> b h v x y z", Q_phi, KV)
-    K_sum = K_phi.sum(dim=[-3, -2, -1])
+    K_sum = K_phi.mean(dim=[-3, -2, -1])
     Z = torch.einsum("b h d x y z, b h d -> b h x y z", Q_phi, K_sum)
     Z = Z + eps
     out = numerator / Z.unsqueeze(2)
@@ -222,7 +297,7 @@ class LinearAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.pe_dim = pe_dim
-        self.conv = WPConv(dim, 3)
+        self.conv = WTConv(dim, 3)
         self.qkv = nn.Conv3d(dim, 3 * dim, kernel_size=1,padding=0, bias=qkv_bias, device=device)
         self.fft_dw = FourierGlobalFilter(dim, pe_dim)
         self.proj = nn.Conv3d(dim, dim, kernel_size=1, bias=proj_bias, device=device)
@@ -382,41 +457,6 @@ class PatchEmbed(nn.Module):
         x = self.proj(x)
         return x
 
-def generate_patch_mask_3d(b, h, w, d, mask_ratio=0.5, device="cuda"):
-    mask = torch.bernoulli(
-        torch.full((b,1, h, w, d), mask_ratio, device=device)
-    )
-    return mask
-
-def patch_mask_to_voxel_mask(mask, pt, ph, pw):
-    """
-    mask: (B, Nt, Nh, Nw)
-    return:
-        voxel_mask: (B, 1, T, H, W)
-    """
-
-    B, Nt, Nh, Nw = mask.shape
-
-    # expand to patch volume
-    mask = mask[:, :, :, :, None, None, None]
-
-    mask = mask.expand(
-        B, Nt, Nh, Nw,
-        pt, ph, pw
-    )
-
-    # rearrange to voxel space
-    mask = mask.permute(0, 1, 4, 2, 5, 3, 6)
-
-    mask = mask.reshape(
-        B,
-        Nt * pt,
-        Nh * ph,
-        Nw * pw
-    )
-
-    return mask.float()
-
 class VisionTransformer(nn.Module):
     def __init__(
             self,
@@ -472,6 +512,7 @@ class VisionTransformer(nn.Module):
                                       self.patch_size,
                                       self.out_channels,
                                       temb_channels, )
+        self._pe_cache = dict()
 
     def _get_pe(self, H, W, D, device):
         x_coords = torch.linspace(-1, 1, steps=H, device=device)
@@ -487,7 +528,9 @@ class VisionTransformer(nn.Module):
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
         x = self.patch_embed(x)
         B, C, H, W, D = x.shape
-        pe = self._get_pe(H, W, D, x.device)
+        if (H, W, D) not in self._pe_cache.keys():
+            self._pe_cache[(H, W, D)] = self._get_pe(H, W, D, torch.device('cpu'))
+        pe = self._pe_cache[(H, W, D)].to(x.device)
         for _, blk in enumerate(self.blocks):
             x = cp.checkpoint(blk,x, emb, pe, use_reentrant=False)
         x = self.final_layer(x, emb)

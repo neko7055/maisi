@@ -94,7 +94,7 @@ class Net(nn.Module):
                                      embed_dim=1024,
                                      temb_channels=self.cond_emb_dim,
                                      num_heads=16,
-                                     depth=28,
+                                     depth=18,
                                      ffn_ratio=4,
                                      legendre_max_degree=21)
 
@@ -145,7 +145,7 @@ class Net(nn.Module):
         Returns:
             A tensor representing the output of the UNet model.
         """
-        # x: torch.Tensor = convert_to_tensor(x)
+        x: torch.Tensor = convert_to_tensor(x)
         emb = self._get_time_and_class_embedding(x, timesteps)
         emb = self._get_input_embeddings(emb, spacing_tensor)
         h = self.vit(x, emb)
