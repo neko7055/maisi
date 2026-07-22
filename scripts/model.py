@@ -91,11 +91,11 @@ class Net(nn.Module):
         self.vit = VisionTransformer(patch_size=(4, 4, 4),
                                      in_chans=4,
                                      out_chans=4,
-                                     embed_dim=1024,
+                                     embed_dim=1152,
                                      temb_channels=self.cond_emb_dim,
                                      num_heads=16,
-                                     depth=18,
-                                     ffn_ratio=4,
+                                     depth=28,
+                                     ffn_ratio=2.5,
                                      legendre_max_degree=21)
 
 

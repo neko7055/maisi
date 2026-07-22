@@ -30,7 +30,7 @@ from .interpolator import linear_interpolate, triangular_interpolate, polynomial
 from .solver import euler_step, midpoint_step, rk4_step, rk5_step
 from .utils import define_instance
 from .model import Net
-
+from .ssim import SSIM
 
 # torch.set_float32_matmul_precision('high')
 # torch.backends.cudnn.allow_tf32 = True
@@ -45,19 +45,6 @@ ode_solver_dict = {"euler":    euler_step,
                    "midpoint": midpoint_step,
                    "rk4":      rk4_step,
                    "rk5":      rk5_step,}
-
-class MultiScaleLoss(torch.nn.Module):
-    def __init__(self, basic_loss: Callable[..., torch.nn.Module], weight: List[float]):
-        super().__init__()
-        self.basic_loss = basic_loss()
-        self.weight = weight
-    def forward(self, y_pred: torch.Tensor, y_gt: torch.Tensor) -> torch.Tensor:
-        loss = self.weight[0] * self.basic_loss(y_pred, y_gt)
-        for w in self.weight[1:]:
-            y_pred = torch.nn.functional.avg_pool3d(y_pred, kernel_size=2, stride=2)
-            y_gt = torch.nn.functional.avg_pool3d(y_gt, kernel_size=2, stride=2)
-            loss += w * self.basic_loss(y_pred, y_gt)
-        return loss
 
 def augment_modality_label(modality_tensor, prob=0.1):
     # (Same as original function)
@@ -189,7 +176,7 @@ def prepare_data(
         affine_kwargs = {
             "keys": ["src_image", "tar_image"],
             "prob": 1.0,  # 這裡設 1.0，改由 OneOf 控制總機率
-            "translate_range": (24, 24, 0),  # 百分比平移可以搭配前述技巧
+            "translate_range": (96, 96, 0),  # 百分比平移可以搭配前述技巧
             "mode": (1, 1),
         }
         augment = monai.transforms.OneOf(
@@ -237,19 +224,19 @@ def load_unet(args: argparse.Namespace, accelerator: Accelerator, logger: loggin
                include_spacing_input=False,)
 
     epoch = 0
-    loss = np.inf
+    eval = -np.inf
     if args.existing_ckpt_filepath is None:
         logger.info("Training from scratch. Checkpoint Path not provided.")
     elif os.path.exists(args.existing_ckpt_filepath):
         checkpoint_unet = torch.load(f"{args.existing_ckpt_filepath}", map_location="cpu", weights_only=False)
         epoch = checkpoint_unet["epoch"]
-        loss = checkpoint_unet["loss"]
+        eval = checkpoint_unet["eval"]
         unet.load_state_dict(checkpoint_unet["unet_state_dict"], strict=True)
         logger.info(f"Pretrained checkpoint {args.existing_ckpt_filepath} loaded.")
     else:
         logger.info(f"Training from scratch. Checkpoint Path {args.existing_ckpt_filepath} does not exist.")
 
-    return unet, epoch, loss
+    return unet, epoch, eval
 
 
 def create_optimizer(model: torch.nn.Module, lr: float) -> torch.optim.Optimizer:
@@ -305,7 +292,8 @@ def evaluate(
         logger.info(f"Evaluating.")
 
     _iter = 0
-    loss_torch = torch.zeros(5, dtype=torch.float, device=accelerator.device)
+    ssim_fn = SSIM(channels=4, window_size=11)
+    eval_torch = torch.zeros(5, dtype=torch.float, device=accelerator.device)
 
     unet.eval()
 
@@ -366,19 +354,19 @@ def evaluate(
                 mu_t_gt, d_mu_t_gt = dry_run(t, mu_t_tf)
                 v_pred_tf = model_wrapper(t, mu_t_gt)
                 mu_t_tf = mu_t_tf + dt * v_pred_tf
-                loss_pose = torch.nn.functional.mse_loss(mu_t, mu_t_tf, reduction='mean') * dt
-                loss_v = torch.nn.functional.l1_loss(d_mu_t_gt, v_pred_tf, reduction='mean') * dt
-                loss_torch[2] += loss_pose.item()
-                loss_torch[3] += loss_v.item()
-            loss = torch.nn.functional.mse_loss(mu_t, tar_images, reduction='mean')
-            loss_tf = torch.nn.functional.mse_loss(mu_t_tf, tar_images, reduction='mean')
-            loss_torch[0] += loss.item()
-            loss_torch[1] += loss_tf.item()
-            loss_torch[-1] += 1.0
+                loss_pose = torch.nn.functional.mse_loss(mu_t.float(), mu_t_tf.float(), reduction='mean') * dt
+                loss_v = torch.nn.functional.l1_loss(d_mu_t_gt.float(), v_pred_tf.float(), reduction='mean') * dt
+                eval_torch[2] += loss_pose.item()
+                eval_torch[3] += loss_v.item()
+            result_ssim = ssim_fn(mu_t.float(), tar_images)
+            result_tf_ssim = ssim_fn(mu_t_tf.float(), tar_images)
+            eval_torch[0] += result_ssim.item()
+            eval_torch[1] += esult_tf.item()
+            eval_torch[-1] += 1.0
 
     # Reduce loss for logging
-    loss_torch = accelerator.reduce(loss_torch, reduction="sum")
-    return loss_torch
+    eval_torch = accelerator.reduce(eval_torch, reduction="sum")
+    return eval_torch
 
 
 def train_one_epoch(
@@ -387,7 +375,6 @@ def train_one_epoch(
         train_loader: DataLoader,
         optimizer: torch.optim.Optimizer,
         lr_scheduler: torch.optim.lr_scheduler.LRScheduler,
-        loss_pt: torch.nn.Module,
         interpolate,
         accelerator: Accelerator,
         logger: logging.Logger,
@@ -403,7 +390,8 @@ def train_one_epoch(
 
     _iter = 0
     loss_torch = torch.zeros(2, dtype=torch.float, device=accelerator.device)
-
+    l1_loss = torch.nn.L1Loss().to(accelerator.device)
+    ssim_loss = SSIMLoss(channels=4, window_size=11).to(accelerator.device)
     unet.train()
 
     # Iterate over loader
@@ -448,8 +436,10 @@ def train_one_epoch(
                                     include_modality,
                                     top_region_index_tensor,
                                     bottom_region_index_tensor,
-                                    modality_tensor)
-                loss = loss_pt(d_mu_t.float(), d_mu_t_gt.float())
+                                    modality_tensor).float()
+                pred_tar = mu_t_gt + (1 - timesteps[:, None, None, None, None]) * d_mu_t
+                pred_src = mu_t_gt - (timesteps[:, None, None, None, None]) * d_mu_t
+                loss = 0.8 * l1_loss(d_mu_t, d_mu_t_gt) + 0.1 * (ssim_loss(pred_tar, tar_images) + ssim_loss(pred_src, src_images))
                 loss_float += loss.item() / time_batch_size
                 accelerator.backward(loss)
                 optimizer.step()
@@ -538,7 +528,7 @@ def diff_model_train(
         assert False, f"ode_solver {args.diffusion_unet_train['ode_solver']} not recognized. Choose from {list(ode_solver_dict.keys())}."
 
     # Load UNet (Move to device logic handled by prepare, but we load first)
-    unet, best_epoch, best_loss = load_unet(args, accelerator, logger)
+    unet, best_epoch, best_eval = load_unet(args, accelerator, logger)
     include_body_region = False
     include_modality = False
 
@@ -604,7 +594,6 @@ def diff_model_train(
     # Calculate steps based on local dataset size (approximate)
     total_steps = args.diffusion_unet_train["n_epochs"] * 20
     lr_scheduler = create_lr_scheduler(optimizer, total_steps)
-    loss_pt = MultiScaleLoss(torch.nn.L1Loss, [0.4, 0.3, 0.2, 0.1]).to(accelerator.device)
 
     # Prepare everything with Accelerate
     # NOTE: We do NOT pass train_loader here because we manually partitioned the dataset
@@ -622,7 +611,6 @@ def diff_model_train(
             train_loader,
             optimizer,
             lr_scheduler,
-            loss_pt,
             interpolate,
             accelerator,
             logger,
@@ -664,20 +652,20 @@ def diff_model_train(
 
             if accelerator.is_main_process:
                 logger.info(
-                    f"epoch {epoch + 1} average mse loss on validation set: {formatted}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
+                    f"epoch {epoch + 1} average evaluation on validation set: {formatted}, time taken: {elapsed_time // 60:.0f}m {elapsed_time % 60:.0f}s.")
             accelerator.free_memory()
-            logger.info(f"epoch {epoch + 1} best loss on validation set: {best_loss:.8f} at epoch {best_epoch + 1}.")
-            if eval_loss_torch[-2] < best_loss:
+            logger.info(f"epoch {epoch + 1} best evaluation on validation set: {best_eval:.8f} at epoch {best_epoch + 1}.")
+            if eval_loss_torch[0] >= best_eval:
                 logger.info("Saving model")
                 save_checkpoint(
                     epoch,
                     unet,
-                    eval_loss_torch[-2],
+                    eval_loss_torch[0],
                     args.model_dir,
                     args,
                     accelerator
                 )
-                best_loss = eval_loss_torch[-2]
+                best_eval = eval_loss_torch[0]
                 best_epoch = epoch
 
     logger.info("Training finished")

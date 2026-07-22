@@ -1,9 +1,3 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-#
-# This software may be used and distributed in accordance with
-# the terms of the DINOv3 License Agreement.
-
-import logging
 import math
 from functools import partial
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple, Union, Callable
@@ -15,19 +9,6 @@ import torch.utils.checkpoint as cp
 
 from .dwt import CDF97DWT3D, CDF97IDWT3D
 
-dtype_dict = {
-    "fp32": torch.float32,
-    "fp16": torch.float16,
-    "bf16": torch.bfloat16,
-}
-
-def make_2tuple(x: tuple[int, int] | int):
-    if isinstance(x, tuple):
-        assert len(x) == 2
-        return x
-
-    assert isinstance(x, int)
-    return x, x
 
 def make_3tuple(x: tuple[int, int, int] | int):
     if isinstance(x, tuple):
@@ -37,7 +18,7 @@ def make_3tuple(x: tuple[int, int, int] | int):
     assert isinstance(x, int)
     return x, x, x
 
-def generate_3d_legendre_pe(coords: torch.Tensor, max_degree: int) -> torch.Tensor:
+def generate_3d_legendre_basis(coords: torch.Tensor, max_degree: int) -> torch.Tensor:
     """
     生成三維勒讓德多項式位置編碼 (3D Legendre Polynomial Encoding)
 
@@ -171,15 +152,16 @@ class Mlp(nn.Module):
     def __init__(
         self,
         in_features: int,
-        ffn_ratio: int,
-        act_layer: Callable[..., nn.Module] = nn.GELU,
+        ffn_ratio: float | int,
+        act_layer: Callable[..., nn.Module] = nn.SiLU,
         bias: bool = True,
         device=None,
     ) -> None:
         super().__init__()
-        self.fc1 = nn.Conv3d(in_features, in_features * ffn_ratio, kernel_size=1, stride=1, padding=0, bias=bias, device=device)
+        hidden_features = int(round(in_features * ffn_ratio))
+        self.fc1 = nn.Conv3d(in_features, 2 * hidden_features, kernel_size=1, stride=1, padding=0, bias=bias, device=device)
         self.act = act_layer()
-        self.fc2 = nn.Conv3d(in_features * ffn_ratio, in_features, kernel_size=1, stride=1, padding=0, bias=bias, device=device)
+        self.fc2 = nn.Conv3d(hidden_features, in_features, kernel_size=1, stride=1, padding=0, bias=bias, device=device)
         self._init_weights()
 
 
@@ -193,7 +175,8 @@ class Mlp(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.fc1(x)
-        x = self.act(x)
+        x1, x2 = x.chunk(2, dim=1)
+        x = x1 * self.act(x2)
         x = self.fc2(x)
         return x
 
@@ -286,7 +269,7 @@ class LinearAttention(nn.Module):
     def __init__(
         self,
         dim: int,
-        pe_dim: int,
+        legendre_basis_dim: int,
         num_heads: int = 8,
         qkv_bias: bool = True,
         proj_bias: bool = True,
@@ -296,10 +279,10 @@ class LinearAttention(nn.Module):
         assert dim % num_heads == 0, "Embedding dimension must be divisible by number of heads."
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
-        self.pe_dim = pe_dim
+        self.legendre_basis_dim = legendre_basis_dim
         self.conv = WTConv(dim, 3)
         self.qkv = nn.Conv3d(dim, 3 * dim, kernel_size=1,padding=0, bias=qkv_bias, device=device)
-        self.fft_dw = FourierGlobalFilter(dim, pe_dim)
+        self.fft_dw = FourierGlobalFilter(dim, legendre_basis_dim)
         self.proj = nn.Conv3d(dim, dim, kernel_size=1, bias=proj_bias, device=device)
         self._init_weights()
 
@@ -311,7 +294,7 @@ class LinearAttention(nn.Module):
         if self.proj.bias is not None:
             nn.init.zeros_(self.proj.bias)
 
-    def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, legendre_basis: torch.Tensor) -> torch.Tensor:
         B, C, H, W, D = x.shape
         qkv = self.qkv(x)
         qkv = qkv.view(B, 3, C, H, W, D)
@@ -322,7 +305,7 @@ class LinearAttention(nn.Module):
         k = k.view(B, self.num_heads, self.head_dim, H, W, D)
         v = v.view(B, self.num_heads, self.head_dim, H, W, D)
         attn_out = linear_attn_enhance(q, k, v)
-        attn_out = attn_out.view(B, C, H, W, D) + self.fft_dw(v.view(B, C, H, W, D), pe)
+        attn_out = attn_out.view(B, C, H, W, D) + self.fft_dw(v.view(B, C, H, W, D), legendre_basis)
         attn_out = self.proj(attn_out)
         return attn_out
 
@@ -330,21 +313,22 @@ class FourierGlobalFilter(nn.Module):
     def __init__(
         self,
         dim: int,
-        pe_dim: int,
+        legendre_basis_dim: int,
     ):
         super().__init__()
-        self.pe_dim = pe_dim
+        self.legendre_basis_dim = legendre_basis_dim
         self.dim = dim
-        self.attn_map = nn.Conv3d(self.pe_dim, self.dim, kernel_size=1, stride=1, padding=0, bias=False)
+        self.conv_weight = nn.Conv3d(self.legendre_basis_dim,
+                                     self.dim,
+                                     kernel_size=1, stride=1, padding=0, bias=False)
         self._init_weights()
-
     def _init_weights(self):
-        torch.nn.init.zeros_(self.attn_map.weight)
-        if self.attn_map.bias is not None:
-            nn.init.zeros_(self.attn_map.bias)
-    def forward(self, x: torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+        torch.nn.init.zeros_(self.conv_weight.weight)
+        if self.conv_weight.bias is not None:
+            nn.init.zeros_(self.conv_weight.bias)
+    def forward(self, x: torch.Tensor, legendre_basis: torch.Tensor) -> torch.Tensor:
         B, C, H, W, D = x.shape
-        weight = self.attn_map(pe)
+        weight = self.conv_weight(legendre_basis)
         x = x.float()
         weight = weight.float()
         weight = torch.fft.rfftn(weight, dim=(-3, -2, -1), norm="ortho")
@@ -357,10 +341,10 @@ class TransformerBlock(nn.Module):
     def __init__(
         self,
         dim: int,
-        pe_dim: int,
+        legendre_basis_dim: int,
         num_heads: int,
         temb_channels: int,
-        ffn_ratio: int = 4,
+        ffn_ratio: float | int = 4,
         qkv_bias: bool = False,
         proj_bias: bool = False,
         ffn_bias: bool = True,
@@ -369,7 +353,7 @@ class TransformerBlock(nn.Module):
         super().__init__()
         self.attn = LinearAttention(
             dim,
-            pe_dim,
+            legendre_basis_dim,
             num_heads=num_heads,
             qkv_bias=qkv_bias,
             proj_bias=proj_bias,
@@ -377,7 +361,7 @@ class TransformerBlock(nn.Module):
         )
         self.mlp = Mlp(dim,
                        ffn_ratio,
-                       act_layer=partial(nn.GELU, approximate="tanh"),
+                       act_layer=nn.SiLU,
                        bias=ffn_bias,
                        device=device)
         self.adaLN_modulation = nn.Sequential(
@@ -386,10 +370,10 @@ class TransformerBlock(nn.Module):
         )
         nn.init.zeros_(self.adaLN_modulation[1].weight)
         nn.init.zeros_(self.adaLN_modulation[1].bias)
-    def forward(self, x: torch.Tensor, emb:torch.Tensor, pe: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, emb:torch.Tensor, legendre_basis: torch.Tensor) -> torch.Tensor:
         (shift_msa, scale_msa, gate_msa,
-        shift_mlp, scale_mlp, gate_mlp)= self.adaLN_modulation(emb).chunk(6, dim=1)
-        x = x + gate_msa[...,None,None,None] * self.attn(modulate(layer_norm(x), shift_msa, scale_msa), pe=pe)
+         shift_mlp, scale_mlp, gate_mlp) = self.adaLN_modulation(emb).chunk(6, dim=1)
+        x = x + gate_msa[...,None,None,None] * self.attn(modulate(layer_norm(x), shift_msa, scale_msa), legendre_basis)
         x = x + gate_mlp[...,None,None,None] * self.mlp(modulate(layer_norm(x), shift_mlp, scale_mlp))
         return x
 
@@ -468,7 +452,7 @@ class VisionTransformer(nn.Module):
             temb_channels: int = 256,
             num_heads: int = 8,
             depth: int = 12,
-            ffn_ratio: int = 4,
+            ffn_ratio: float | int = 4,
             qkv_bias: bool = False,
             proj_bias: bool = True,
             ffn_bias: bool = True,
@@ -482,7 +466,7 @@ class VisionTransformer(nn.Module):
         self.n_blocks = depth
         self.patch_size = patch_size
         self.legendre_max_degree = legendre_max_degree
-        self.pe_dim = math.comb(legendre_max_degree + 3, 3)
+        self.legendre_basis_dim = math.comb(legendre_max_degree + 3, 3)
 
         self.patch_embed = PatchEmbed(
             patch_size=patch_size,
@@ -493,7 +477,7 @@ class VisionTransformer(nn.Module):
         blocks_list = [
             TransformerBlock(
                 dim=embed_dim,
-                pe_dim=self.pe_dim,
+                legendre_basis_dim=self.legendre_basis_dim,
                 num_heads=num_heads,
                 temb_channels=temb_channels,
                 ffn_ratio=ffn_ratio_sequence[i],
@@ -512,15 +496,15 @@ class VisionTransformer(nn.Module):
                                       self.patch_size,
                                       self.out_channels,
                                       temb_channels, )
-        self._pe_cache = dict()
+        self._legendre_basis_cache = dict()
 
-    def _get_pe(self, H, W, D, device):
+    def _get_legendre_basis(self, H, W, D, device):
         x_coords = torch.linspace(-1, 1, steps=H, device=device)
         y_coords = torch.linspace(-1, 1, steps=W, device=device)
         z_coords = torch.linspace(-1, 1, steps=D, device=device)
         X, Y, Z = torch.meshgrid(x_coords, y_coords, z_coords, indexing='ij')
         coords = torch.stack([X.reshape(-1), Y.reshape(-1), Z.reshape(-1)], dim=-1)
-        embeddings = generate_3d_legendre_pe(coords, self.legendre_max_degree)
+        embeddings = generate_3d_legendre_basis(coords, self.legendre_max_degree)
         embeddings = embeddings.view(H, W, D, -1)
         embeddings = embeddings.permute(-1, 0, 1, 2).unsqueeze(0)
         return embeddings
@@ -528,11 +512,11 @@ class VisionTransformer(nn.Module):
     def forward(self, x: torch.Tensor, emb: torch.Tensor) -> tuple[Tensor, Any] | Tensor:
         x = self.patch_embed(x)
         B, C, H, W, D = x.shape
-        if (H, W, D) not in self._pe_cache.keys():
-            self._pe_cache[(H, W, D)] = self._get_pe(H, W, D, torch.device('cpu'))
-        pe = self._pe_cache[(H, W, D)].to(x.device)
+        if (H, W, D) not in self._legendre_basis_cache.keys():
+            self._legendre_basis_cache[(H, W, D)] = self._get_legendre_basis(H, W, D, torch.device('cpu'))
+        legendre_basis = self._legendre_basis_cache[(H, W, D)].to(x.device)
         for _, blk in enumerate(self.blocks):
-            x = cp.checkpoint(blk,x, emb, pe, use_reentrant=False)
+            x = cp.checkpoint(blk,x, emb, legendre_basis, use_reentrant=False)
         x = self.final_layer(x, emb)
         x = x.reshape(shape=(B, self.out_channels,
                              self.final_layer.patch_size[0],
