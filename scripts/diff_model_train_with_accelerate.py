@@ -292,7 +292,7 @@ def evaluate(
         logger.info(f"Evaluating.")
 
     _iter = 0
-    ssim_fn = SSIM(channels=4, window_size=11)
+    ssim_fn = SSIM(channels=4, window_size=11).to(accelerator.device)
     eval_torch = torch.zeros(5, dtype=torch.float, device=accelerator.device)
 
     unet.eval()
@@ -361,7 +361,7 @@ def evaluate(
             result_ssim = ssim_fn(mu_t.float(), tar_images)
             result_tf_ssim = ssim_fn(mu_t_tf.float(), tar_images)
             eval_torch[0] += result_ssim.item()
-            eval_torch[1] += esult_tf.item()
+            eval_torch[1] += result_tf_ssim.item()
             eval_torch[-1] += 1.0
 
     # Reduce loss for logging
