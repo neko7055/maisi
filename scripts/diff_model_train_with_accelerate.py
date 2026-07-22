@@ -390,8 +390,8 @@ def train_one_epoch(
 
     _iter = 0
     loss_torch = torch.zeros(2, dtype=torch.float, device=accelerator.device)
-    l1_loss = torch.nn.L1Loss().to(accelerator.device)
-    ssim_loss = SSIMLoss(channels=4, window_size=11).to(accelerator.device)
+    l1_loss_fn = torch.nn.L1Loss().to(accelerator.device)
+    ssim_fn = SSIM(channels=4, window_size=11).to(accelerator.device)
     unet.train()
 
     # Iterate over loader
@@ -439,7 +439,9 @@ def train_one_epoch(
                                     modality_tensor).float()
                 pred_tar = mu_t_gt + (1 - timesteps[:, None, None, None, None]) * d_mu_t
                 pred_src = mu_t_gt - (timesteps[:, None, None, None, None]) * d_mu_t
-                loss = 0.8 * l1_loss(d_mu_t, d_mu_t_gt) + 0.1 * (ssim_loss(pred_tar, tar_images) + ssim_loss(pred_src, src_images))
+                ssim_loss = ((1-ssim_fn(pred_tar.float(), tar_images)) + (1-ssim_fn(pred_src.float(), src_images)))/4
+                l1_loss = l1_loss_fn(d_mu_t.float(), d_mu_t_gt)
+                loss = 0.16 * l1_loss + 0.84 * ssim_loss
                 loss_float += loss.item() / time_batch_size
                 accelerator.backward(loss)
                 optimizer.step()
