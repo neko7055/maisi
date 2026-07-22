@@ -471,7 +471,7 @@ def train_one_epoch(
 def save_checkpoint(
         epoch: int,
         unet: torch.nn.Module,
-        loss_torch_epoch: float,
+        eval_torch_epoch: float,
         ckpt_folder: str,
         args: argparse.Namespace,
         accelerator: Accelerator
@@ -487,7 +487,7 @@ def save_checkpoint(
         torch.save(
             {
                 "epoch": epoch + 1,
-                "loss": loss_torch_epoch,
+                "eval": eval_torch_epoch,
                 "unet_state_dict": unwrapped_unet.state_dict(),
             },
             f"{ckpt_folder}/{args.model_filename}",
